@@ -1,24 +1,32 @@
 data:
-  # HuggingFace dataset ID — streaming, no local download
-  dataset_name: mozilla-foundation/common_voice_17_0
-  language: kn              # ISO 639-1 code for your target language
+  dataset_name: ai4bharat/IndicVoices
+  language: punjabi
 
-  # Split keys as they appear in the HF dataset card
   split_train: train
-  split_val: validation
-  split_test: test
+  split_val_candidates:
+    - validation
+    - valid
+    - test
 
-  # Column names (Common Voice defaults — adjust for other datasets)
   audio_column: audio
-  text_column: sentence
+  text_candidates:
+    - normalized
+    - text
+    - verbatim
+  domain_column: task_name
 
-  # Audio
   sampling_rate: 16000
-  max_duration_secs: 30.0   # Whisper hard limit
-  min_duration_secs: 0.1    # drop near-silent samples
+  min_duration_secs: 1.0
+  max_duration_secs: 30.0
 
-  # Streaming-specific
-  # Larger buffer = better shuffle randomness but higher RAM usage.
-  # 500 is safe for ~16 GB RAM; increase to 1000-2000 if you have more.
-  buffer_size: 500
+  shuffle_buffer_size: 500
+  prefetch_size: 8
   seed: 42
+
+model:
+  processor_name: openai/whisper-small
+
+batching:
+  train_batch_size: 16
+  eval_batch_size: 8
+  max_label_length: 256
