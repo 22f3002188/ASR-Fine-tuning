@@ -1,21 +1,48 @@
 model:
-  name: openai/whisper-small   # change to medium / large-v3 as needed
-  language: null               # e.g. "hindi", "kannada"
+  name: openai/whisper-large-v3
+  language: punjabi
   task: transcribe
 
 training:
   output_dir: checkpoints/
-  num_train_epochs: 10
+
+  # IndicVoices is massive — estimate max_steps from your subset size.
+  # e.g. 200k samples / (64 batch * 1 accum) = ~3125 steps/epoch * 10 = 31250
+  max_steps: 30000
+  warmup_steps: 1000
+
+  # Reduce per-device batch to avoid OOM on large-v3.
+  # Effective batch = 16 * 4 = 64 — same as before.
   per_device_train_batch_size: 16
   per_device_eval_batch_size: 8
-  gradient_accumulation_steps: 2
-  learning_rate: 1e-5
-  warmup_steps: 500
-  eval_strategy: epoch
-  save_strategy: epoch
+  gradient_accumulation_steps: 4
+
+  # 2e-5 causes gradient underflow in bf16 during warmup on large-v3.
+  # Whisper paper recommends ~1e-5 max for large models; 5e-6 is safer.
+  learning_rate: 5.0e-6
+  lr_scheduler_type: linear
+  weight_decay: 0.01
+
+  eval_strategy: steps
+  eval_steps: 2000
+  save_strategy: steps
+  save_steps: 2000
+  save_total_limit: 3
   load_best_model_at_end: true
   metric_for_best_model: wer
-  fp16: true
-  generation_max_length: 225
-  logging_steps: 25
-  report_to: wandb
+  greater_is_better: false
+
+  bf16: true
+  fp16: false
+  gradient_checkpointing: true     # large-v3 needs this
+  # num_workers=0 is safest for streaming datasets on machines with limited /dev/shm.
+  # Increase to 4-8 on machines with large shared memory (check: df -h /dev/shm).
+  dataloader_num_workers: 0
+  dataloader_pin_memory: false
+
+  predict_with_generate: true
+  generation_max_length: 448    # Whisper decoder hard limit — do not exceed
+
+  logging_steps: 50
+  report_to: tensorboard           # tensorboard as requested
+  smoke_test_steps: 10
