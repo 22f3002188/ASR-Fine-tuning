@@ -15,8 +15,12 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
-from datasets import load_dataset, IterableDataset, Audio
+from datasets import load_dataset, IterableDataset
 from transformers import WhisperFeatureExtractor, WhisperTokenizer
+
+import io
+import soundfile as sf
+import librosa
 
 from src.data.augment import AudioAugmentor
 
@@ -24,32 +28,91 @@ from src.data.augment import AudioAugmentor
 SAMPLE_RATE = 16_000
 
 
-# ── Audio decoding helper (Section 4) ─────────────────────────────────────────
+# ── Audio decoding helper ─────────────────────────────────────────────────────
 
 def decode_audio(af) -> Optional[np.ndarray]:
     """
-    Decode an IndicVoices AudioDecoder (torchcodec backend) to numpy float32.
-    Returns shape (num_samples,) at 16kHz, or None on failure.
-
-    After cast_column, `af` is already a dict {"array": ..., "sampling_rate": ...}.
-    This function handles both the cast_column output and the raw AudioDecoder
-    as a fallback, making it robust to dataset version differences.
+    Decode audio safely without torchcodec.
+    
+    Supports:
+    - HF streaming audio dict
+    - raw bytes
+    - filepath string
     """
     if af is None:
         return None
+
     try:
-        # Primary path: cast_column already decoded to dict
+        # Already decoded by dataset / dict format
         if isinstance(af, dict):
-            arr = np.array(af["array"], dtype=np.float32)
-            if arr.ndim > 1:
-                arr = arr.mean(axis=0)   # stereo → mono
-            return arr
-        # Fallback: raw torchcodec AudioDecoder
-        decoded = af.get_all_samples()
-        # data: Tensor (1, num_samples) — already mono, float32, 16kHz
-        return decoded.data.squeeze(0).numpy().astype(np.float32)
-    except Exception:
+            if "array" in af:
+                arr = np.asarray(af["array"], dtype=np.float32)
+
+                if arr.ndim > 1:
+                    arr = arr.mean(axis=0)
+
+                if af.get("sampling_rate", SAMPLE_RATE) != SAMPLE_RATE:
+                    arr = librosa.resample(
+                        arr,
+                        orig_sr=af["sampling_rate"],
+                        target_sr=SAMPLE_RATE
+                    )
+
+                return arr.astype(np.float32)
+
+            # filepath-style dict
+            if "path" in af and af["path"]:
+                audio, sr = sf.read(af["path"])
+
+                if audio.ndim > 1:
+                    audio = audio.mean(axis=1)
+
+                if sr != SAMPLE_RATE:
+                    audio = librosa.resample(
+                        audio,
+                        orig_sr=sr,
+                        target_sr=SAMPLE_RATE
+                    )
+
+                return audio.astype(np.float32)
+
+        # plain filepath string
+        if isinstance(af, str):
+            audio, sr = sf.read(af)
+
+            if audio.ndim > 1:
+                audio = audio.mean(axis=1)
+
+            if sr != SAMPLE_RATE:
+                audio = librosa.resample(
+                    audio,
+                    orig_sr=sr,
+                    target_sr=SAMPLE_RATE
+                )
+
+            return audio.astype(np.float32)
+
+        # raw bytes stream
+        if isinstance(af, bytes):
+            audio, sr = sf.read(io.BytesIO(af))
+
+            if audio.ndim > 1:
+                audio = audio.mean(axis=1)
+
+            if sr != SAMPLE_RATE:
+                audio = librosa.resample(
+                    audio,
+                    orig_sr=sr,
+                    target_sr=SAMPLE_RATE
+                )
+
+            return audio.astype(np.float32)
+
+    except Exception as e:
+        print(f"Audio decode failed: {e}")
         return None
+
+    return None
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -63,7 +126,7 @@ class DataConfig:
     audio_column: str = "audio_filepath"
     text_column: str = "normalized"
     sampling_rate: int = SAMPLE_RATE
-    feature_size: int = 128      # mel bins: 128 for large-v3, 80 for small/medium
+    feature_size: int = 128
     max_duration_secs: float = 30.0
     min_duration_secs: float = 0.1
     buffer_size: int = 5000
@@ -75,8 +138,8 @@ class DataConfig:
     def from_omega(cls, cfg) -> "DataConfig":
         import dataclasses
         from omegaconf import OmegaConf
+
         raw = OmegaConf.to_container(cfg.data, resolve=True)
-        # Drop any keys not present in DataConfig to handle config/code drift
         valid_fields = {f.name for f in dataclasses.fields(cls)}
         filtered = {k: v for k, v in raw.items() if k in valid_fields}
         return cls(**filtered)
@@ -87,12 +150,6 @@ class DataConfig:
 class StreamingASRDataset:
     """
     Wraps IndicVoices as a lazy streaming IterableDataset for Whisper finetuning.
-
-    Usage:
-        ds = StreamingASRDataset(config, feature_extractor, tokenizer)
-        ds.load()
-        train_ds = ds.get_split("train", shuffle=True)
-        val_ds   = ds.get_split("val",   shuffle=False)
     """
 
     def __init__(
@@ -114,52 +171,48 @@ class StreamingASRDataset:
             do_spec_augment=aug_cfg.get("spec_augment", True),
         ) if aug_cfg.get("enabled", False) else None
 
-    # ── Loading ───────────────────────────────────────────────────────────────
-
     def load(self) -> "StreamingASRDataset":
-        """
-        Load both splits in streaming mode and cast audio column.
-        cast_column(Audio(sampling_rate=16000)) triggers torchcodec decoding
-        on-the-fly — no audio is loaded until iteration begins.
-        trust_remote_code=True is required for IndicVoices' custom loader.
-        """
         raw = load_dataset(
             self.config.dataset_name,
             self.config.language,
             streaming=True,
-            trust_remote_code=True,
             token=True,
         )
-        # Cast audio column so HF decodes AudioDecoder → float32 array at 16kHz
+    
+        # Disable automatic feature decoding
         self._raw = {
-            split: ds.cast_column(self.config.audio_column, Audio(sampling_rate=SAMPLE_RATE))
+            split: ds.with_format(None)
             for split, ds in raw.items()
         }
+    
         return self
 
     def get_split(self, split: str, shuffle: bool = False) -> IterableDataset:
-        """
-        Return a fully processed IterableDataset for the requested split.
-
-        Args:
-            split   : "train" or "val"
-            shuffle : True for train, False for val/test
-        """
         assert self._raw is not None, "Call .load() first."
 
-        split_key = self.config.split_train if split == "train" else self.config.split_val
+        split_key = (
+            self.config.split_train
+            if split == "train"
+            else self.config.split_val
+        )
+
         ds: IterableDataset = self._raw[split_key]
 
         if shuffle:
-            ds = ds.shuffle(seed=self.config.seed, buffer_size=self.config.buffer_size)
+            ds = ds.shuffle(
+                seed=self.config.seed,
+                buffer_size=self.config.buffer_size
+            )
 
-        is_train = (split == "train")
+        is_train = split == "train"
+
         ds = ds.map(
             lambda sample: self._prepare_sample(sample, augment=is_train),
             remove_columns=self._columns_to_remove(ds),
         )
-        # Drop samples that failed decoding or duration check
+
         ds = ds.filter(lambda x: x["input_features"] is not None)
+
         return ds
 
     def get_split_as_list(
@@ -169,100 +222,97 @@ class StreamingASRDataset:
         shuffle: bool = False,
     ) -> list[dict]:
         """
-        Stream exactly n_samples valid samples from a split into a list.
-        Uses a 3x oversampling buffer to account for invalid/filtered rows,
-        matching the approach from Section 5 of the dataset exploration notebook.
-
-        Useful for: prepare_data.py validation, quick eval, collator testing.
-        NOT for training — use get_split() (lazy IterableDataset) instead.
-
-        Args:
-            split     : "train" or "val"
-            n_samples : exact number of valid samples to collect
-            shuffle   : whether to shuffle the stream before sampling
+        Buffered sample collection using incoming branch batching logic.
         """
         assert self._raw is not None, "Call .load() first."
 
-        split_key = self.config.split_train if split == "train" else self.config.split_val
+        split_key = (
+            self.config.split_train
+            if split == "train"
+            else self.config.split_val
+        )
+
         stream: IterableDataset = self._raw[split_key]
 
         if shuffle:
-            stream = stream.shuffle(seed=self.config.seed, buffer_size=self.config.buffer_size)
+            stream = stream.shuffle(
+                seed=self.config.seed,
+                buffer_size=self.config.buffer_size
+            )
 
-        # 3x budget to account for filtered rows (corrupt audio, bad duration, empty text)
         budget = n_samples * 3
-        is_train = (split == "train")
+        is_train = split == "train"
 
         processed = []
+        buffer = []
+
         for row in itertools.islice(stream, budget):
             sample = self._prepare_sample(row, augment=is_train)
+
             if sample["input_features"] is None:
                 continue
-            processed.append(sample)
+
+            buffer.append(sample)
+
+            # borrowed batching logic
+            if len(buffer) >= 8:
+                processed.extend(buffer)
+                buffer = []
+
             if len(processed) >= n_samples:
                 break
 
-        return processed
+        if buffer:
+            processed.extend(buffer)
 
-    # ── Core transform ────────────────────────────────────────────────────────
+        return processed[:n_samples]
 
     def _prepare_sample(self, sample: dict, augment: bool = False) -> dict:
-        """
-        Decode audio, validate duration, extract log-mel features, tokenize text.
-        Returns {"input_features": None, "labels": None} for invalid samples.
-
-        After cast_column, sample[audio_column] is:
-            {"array": np.ndarray, "sampling_rate": 16000, "path": str | None}
-        """
-        # ── Decode ────────────────────────────────────────────────────────────
         audio_array = decode_audio(sample.get(self.config.audio_column))
+
         if audio_array is None or len(audio_array) == 0:
             return {"input_features": None, "labels": None}
 
-        # ── Duration filter ───────────────────────────────────────────────────
         duration = len(audio_array) / self.config.sampling_rate
-        if not (self.config.min_duration_secs <= duration <= self.config.max_duration_secs):
+
+        if not (
+            self.config.min_duration_secs
+            <= duration
+            <= self.config.max_duration_secs
+        ):
             return {"input_features": None, "labels": None}
 
-        # ── Text ──────────────────────────────────────────────────────────────
         text = str(sample.get(self.config.text_column, "")).strip()
+
         if not text:
             return {"input_features": None, "labels": None}
 
-        # ── Waveform augmentation (train only) ────────────────────────────────
         if augment and self._train_augmentor is not None:
             audio_array = self._train_augmentor.augment_waveform(audio_array)
 
-        # ── Log-mel feature extraction ────────────────────────────────────────
         input_features = self.feature_extractor(
             audio_array,
             sampling_rate=self.config.sampling_rate,
-        ).input_features[0]   # (80, 3000) — already a numpy array
+        ).input_features[0]
 
-        # ── SpecAugment on features (train only) ──────────────────────────────
         if augment and self._train_augmentor is not None:
             input_features = self._train_augmentor.augment_features(input_features)
 
-        # ── Text normalisation + tokenisation ─────────────────────────────────
         if self.config.normalization == "basic":
             text = _basic_normalize(text)
 
         labels = self.tokenizer(text).input_ids
 
-        return {"input_features": input_features, "labels": labels}
+        return {
+            "input_features": input_features,
+            "labels": labels
+        }
 
     def _columns_to_remove(self, ds: IterableDataset) -> list[str]:
         keep = {"input_features", "labels"}
         return [c for c in ds.column_names if c not in keep]
 
 
-# ── Text normalisation ─────────────────────────────────────────────────────────
-
 def _basic_normalize(text: str) -> str:
-    """
-    Strip whitespace and collapse internal spaces.
-    Gurmukhi (Punjabi script) is unicase — do NOT lowercase.
-    Extend here for numeral normalisation, punctuation stripping, etc.
-    """
     import re
     return re.sub(r"\s+", " ", text.strip())

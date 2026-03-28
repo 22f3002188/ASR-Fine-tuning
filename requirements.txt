@@ -1,24 +1,8 @@
-# Core
-torch>=2.0
-transformers>=4.40
-datasets>=2.19
-accelerate>=0.30
-peft>=0.10
-
-# ASR-specific
-jiwer>=3.0
-faster-whisper>=1.0
-
-# Augmentation
-audiomentations>=0.33
-
-# Experiment tracking
-wandb
-
-# Config
-hydra-core>=1.3
-
-# Dev
-pytest
-black
-ruff
+torch
+transformers
+datasets[audio]
+huggingface_hub
+pyyaml
+librosa
+soundfile
+numpy
