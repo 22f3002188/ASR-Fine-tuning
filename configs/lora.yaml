@@ -1,5 +1,7 @@
+# LoRA is currently disabled — vanilla full finetuning is used instead.
+# Re-enable by setting enabled: true and wiring apply_lora() back into train.py.
 lora:
-  enabled: true
+  enabled: false
   r: 32
   lora_alpha: 64
   target_modules:
@@ -10,6 +12,6 @@ lora:
   apply_to: decoder_only
 
 freeze:
-  encoder: true
+  encoder: false
   freeze_decoder_layers: 0
-  freeze_embed_positions: true
+  freeze_embed_positions: false

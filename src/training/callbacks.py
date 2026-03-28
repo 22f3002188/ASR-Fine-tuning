@@ -1,32 +1,20 @@
 """
-Custom HuggingFace Trainer callbacks.
+Custom Trainer callbacks for vanilla Whisper finetuning.
 
-  - SavePeftAdapterCallback : saves only the LoRA adapter weights at each
-                              checkpoint, not the full model. Keeps checkpoint
-                              size from ~6GB (full large-v3) to ~50MB.
-
-  - EarlyStoppingOnWER      : stops training if WER hasn't improved by a
-                              minimum delta over a patience window. The built-in
-                              EarlyStoppingCallback works on loss — this one
-                              works on WER directly, which is what matters.
+  - SaveCheckpointCallback : saves the full model + processor at each checkpoint.
+  - EarlyStoppingOnWER     : stops training when WER stops improving.
 """
 
 import os
-import shutil
-
 from transformers import TrainerCallback, TrainerControl, TrainerState, TrainingArguments
 
 
-class SavePeftAdapterCallback(TrainerCallback):
+class SaveCheckpointCallback(TrainerCallback):
     """
-    At every checkpoint save, write only the LoRA adapter weights.
-
-    The full model weights are unchanged and don't need to be saved —
-    they can be reloaded from the HuggingFace Hub at merge time.
-    This keeps each checkpoint at ~50MB instead of ~6GB for large-v3.
-
-    The adapter is saved to:
-        {output_dir}/checkpoint-{step}/adapter_model/
+    Save the full model and processor at every checkpoint step.
+    The Trainer already saves optimizer state — this additionally
+    saves the HuggingFace model format so the checkpoint is
+    self-contained for inference.
     """
 
     def on_save(
@@ -36,16 +24,19 @@ class SavePeftAdapterCallback(TrainerCallback):
         control: TrainerControl,
         **kwargs,
     ):
-        model = kwargs.get("model")
-        if model is None or not hasattr(model, "save_pretrained"):
+        model     = kwargs.get("model")
+        tokenizer = kwargs.get("tokenizer")   # actually the feature_extractor here
+        if model is None:
             return control
 
         checkpoint_dir = os.path.join(
             args.output_dir, f"checkpoint-{state.global_step}"
         )
-        adapter_dir = os.path.join(checkpoint_dir, "adapter_model")
-        model.save_pretrained(adapter_dir)
-        print(f"[SavePeftAdapterCallback] Adapter saved → {adapter_dir}")
+        model.save_pretrained(checkpoint_dir)
+        if tokenizer is not None:
+            tokenizer.save_pretrained(checkpoint_dir)
+
+        print(f"[SaveCheckpointCallback] Saved → {checkpoint_dir}")
         return control
 
 
@@ -55,16 +46,15 @@ class EarlyStoppingOnWER(TrainerCallback):
     over the last `patience` evaluations.
 
     Args:
-        patience  : number of eval steps without improvement before stopping
-        min_delta : minimum absolute WER improvement to count as progress
-                    (e.g. 0.001 = 0.1 WER point)
+        patience  : evaluations without improvement before stopping
+        min_delta : minimum WER improvement to count as progress
     """
 
     def __init__(self, patience: int = 5, min_delta: float = 0.001):
-        self.patience     = patience
-        self.min_delta    = min_delta
-        self._best_wer    = float("inf")
-        self._no_improve  = 0
+        self.patience    = patience
+        self.min_delta   = min_delta
+        self._best_wer   = float("inf")
+        self._no_improve = 0
 
     def on_evaluate(
         self,
@@ -84,12 +74,12 @@ class EarlyStoppingOnWER(TrainerCallback):
         else:
             self._no_improve += 1
             print(
-                f"[EarlyStoppingOnWER] No improvement for {self._no_improve}/{self.patience} "
-                f"evals. Best WER: {self._best_wer:.4f}, current: {wer:.4f}"
+                f"[EarlyStoppingOnWER] No improvement {self._no_improve}/{self.patience}. "
+                f"Best: {self._best_wer:.4f}  Current: {wer:.4f}"
             )
 
         if self._no_improve >= self.patience:
-            print(f"[EarlyStoppingOnWER] Stopping — no WER improvement for {self.patience} evals.")
+            print(f"[EarlyStoppingOnWER] Stopping.")
             control.should_training_stop = True
 
         return control

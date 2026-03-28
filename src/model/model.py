@@ -1,9 +1,9 @@
 """
-Whisper model loader.
+Whisper model loader for vanilla (full) finetuning.
 
-Loads the base WhisperForConditionalGeneration checkpoint and configures
-the forced decoder ids and language/task tokens so generation is
-constrained to Punjabi transcription without beam search guessing.
+No LoRA, no adapter wrapping, no layer freezing.
+The full model is trained end-to-end with the optimizer
+updating all parameters.
 """
 
 from transformers import WhisperForConditionalGeneration, WhisperProcessor
@@ -11,26 +11,25 @@ from transformers import WhisperForConditionalGeneration, WhisperProcessor
 
 def load_model(cfg) -> WhisperForConditionalGeneration:
     """
-    Load Whisper from HuggingFace Hub and apply generation config.
+    Load Whisper from HuggingFace Hub and configure generation settings.
 
     Args:
         cfg : merged OmegaConf config (output of load_config())
 
     Returns:
-        WhisperForConditionalGeneration ready for LoRA / freeze application.
+        WhisperForConditionalGeneration with generation config set.
     """
     model_name = cfg.model.name
-
     model = WhisperForConditionalGeneration.from_pretrained(model_name)
 
-    # Disable default forced_decoder_ids — the Trainer sets these via
-    # generation_config during training. Leaving them set causes a shape
-    # mismatch when predict_with_generate=True.
+    # Disable forced_decoder_ids on model.config — the Trainer uses
+    # generation_config instead, and having both causes a shape mismatch
+    # during predict_with_generate=True evaluation.
     model.config.forced_decoder_ids = None
     model.config.suppress_tokens    = []
 
-    # Tell the model which language + task to use at generation time.
-    # This writes into model.generation_config which the Trainer reads.
+    # Set language + task on generation_config so every generate() call
+    # is constrained to Punjabi transcription automatically.
     processor = WhisperProcessor.from_pretrained(
         model_name,
         language=cfg.model.language,

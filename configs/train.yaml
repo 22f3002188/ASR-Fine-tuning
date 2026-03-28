@@ -11,11 +11,15 @@ training:
   max_steps: 30000
   warmup_steps: 1000
 
-  per_device_train_batch_size: 64
-  per_device_eval_batch_size: 32
-  gradient_accumulation_steps: 1   # effective batch = 64
+  # Reduce per-device batch to avoid OOM on large-v3.
+  # Effective batch = 16 * 4 = 64 — same as before.
+  per_device_train_batch_size: 16
+  per_device_eval_batch_size: 8
+  gradient_accumulation_steps: 4
 
-  learning_rate: 2.0e-5
+  # 2e-5 causes gradient underflow in bf16 during warmup on large-v3.
+  # Whisper paper recommends ~1e-5 max for large models; 5e-6 is safer.
+  learning_rate: 5.0e-6
   lr_scheduler_type: linear
   weight_decay: 0.01
 
@@ -30,13 +34,15 @@ training:
 
   bf16: true
   fp16: false
-  gradient_checkpointing: true     
-  dataloader_num_workers: 8
-  dataloader_pin_memory: true
+  gradient_checkpointing: true     # large-v3 needs this
+  # num_workers=0 is safest for streaming datasets on machines with limited /dev/shm.
+  # Increase to 4-8 on machines with large shared memory (check: df -h /dev/shm).
+  dataloader_num_workers: 0
+  dataloader_pin_memory: false
 
   predict_with_generate: true
-  generation_max_length: 225
+  generation_max_length: 448    # Whisper decoder hard limit — do not exceed
 
   logging_steps: 50
-  report_to: tensorboard           
+  report_to: tensorboard           # tensorboard as requested
   smoke_test_steps: 10

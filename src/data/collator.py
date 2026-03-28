@@ -36,6 +36,7 @@ class DataCollatorSpeechSeq2SeqWithPadding:
     """
     processor: Any
     decoder_start_token_id: int
+    model_dtype: Any = None    # e.g. torch.float16 — cast input_features to match model weights
 
     def __call__(
         self,
@@ -46,6 +47,13 @@ class DataCollatorSpeechSeq2SeqWithPadding:
         # Already fixed-length (30s = 3000 frames) — just stack into a tensor.
         input_features = [{"input_features": f["input_features"]} for f in features]
         batch = self.processor.feature_extractor.pad(input_features, return_tensors="pt")
+
+        # feature_extractor.pad() always returns float32. Cast to float16 here
+        # so it matches model weight dtype under DataParallel / bf16 training.
+        # The Trainer does this automatically in single-GPU mode but not always
+        # through DataParallel — doing it in the collator is the safe universal fix.
+        if self.model_dtype is not None:
+            batch["input_features"] = batch["input_features"].to(self.model_dtype)
 
         # ── Labels ────────────────────────────────────────────────────────────
         # Pad to max length in this batch, then replace pad token id with -100.
