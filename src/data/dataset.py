@@ -63,6 +63,7 @@ class DataConfig:
     audio_column: str = "audio_filepath"
     text_column: str = "normalized"
     sampling_rate: int = SAMPLE_RATE
+    feature_size: int = 128      # mel bins: 128 for large-v3, 80 for small/medium
     max_duration_secs: float = 30.0
     min_duration_secs: float = 0.1
     buffer_size: int = 5000
@@ -72,8 +73,13 @@ class DataConfig:
 
     @classmethod
     def from_omega(cls, cfg) -> "DataConfig":
+        import dataclasses
         from omegaconf import OmegaConf
-        return cls(**OmegaConf.to_container(cfg.data, resolve=True))
+        raw = OmegaConf.to_container(cfg.data, resolve=True)
+        # Drop any keys not present in DataConfig to handle config/code drift
+        valid_fields = {f.name for f in dataclasses.fields(cls)}
+        filtered = {k: v for k, v in raw.items() if k in valid_fields}
+        return cls(**filtered)
 
 
 # ── Dataset ───────────────────────────────────────────────────────────────────
@@ -121,6 +127,7 @@ class StreamingASRDataset:
             self.config.dataset_name,
             self.config.language,
             streaming=True,
+            trust_remote_code=True,
             token=True,
         )
         # Cast audio column so HF decodes AudioDecoder → float32 array at 16kHz

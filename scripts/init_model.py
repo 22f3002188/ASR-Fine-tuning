@@ -56,32 +56,17 @@ def main():
     print_trainable_parameters(model)
     print()
 
-    # Show which top-level modules have any trainable params
-    print("── Trainable modules ───────────────────────────────────────")
-    for name, module in model.named_modules():
-        trainable = sum(p.numel() for p in module.parameters() if p.requires_grad)
-        if trainable > 0 and "." not in name.split("lora_")[-1]:
-            # Only print leaf-ish names to avoid flooding
-            print(f"  {name:<60} {trainable:>12,} params")
+    # Show a sample of trainable parameter names (fast — no submodule iteration)
+    print("── Sample trainable parameters ─────────────────────────────")
+    trainable_names = [n for n, p in model.named_parameters() if p.requires_grad]
+    for n in trainable_names[:10]:
+        print(f"  {n}")
+    if len(trainable_names) > 10:
+        print(f"  ... ({len(trainable_names)} total trainable tensors)")
 
-    # ── Step 5: forward pass smoke test ───────────────────────────────────────
-    print("\n── Forward pass smoke test ─────────────────────────────────")
-    model.eval()
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model  = model.to(device)
-
-    batch_size = 2
-    dummy_features = torch.zeros(batch_size, 80, 3000, device=device)
-    dummy_labels   = torch.zeros(batch_size, 10,       device=device, dtype=torch.long)
-
-    with torch.no_grad():
-        out = model(input_features=dummy_features, labels=dummy_labels)
-
-    print(f"  Device     : {device}")
-    print(f"  Loss       : {out.loss.item():.4f}  (non-zero = forward pass OK)")
-    print(f"  Logits     : {tuple(out.logits.shape)}")
-    print("\nModel initialisation complete. Safe to proceed to Step 4.\n")
+    print("\nModel initialisation complete. Safe to proceed to Step 4.")
+    print("Run SMOKE_TEST=true python scripts/train.py on GPU for end-to-end check.\n")
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

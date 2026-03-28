@@ -49,6 +49,7 @@ def main():
         cfg.model.name,
         language=cfg.model.language,
         task=cfg.model.task,
+        feature_size=cfg.data.get("feature_size", 128),
     )
 
     # ── 2. Model → LoRA → Freeze ──────────────────────────────────────────────
@@ -152,7 +153,7 @@ def main():
         data_collator=collator,
         compute_metrics=compute_metrics,
         callbacks=callbacks,
-        tokenizer=processor.feature_extractor,  # used for saving processor config
+        processing_class=processor.feature_extractor,  # used for saving processor config
     )
 
     # ── 9. Train ──────────────────────────────────────────────────────────────

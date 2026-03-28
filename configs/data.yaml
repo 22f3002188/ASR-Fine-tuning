@@ -3,9 +3,10 @@ data:
   language: punjabi
   split_train: train
   split_val: valid
-  audio_column: audio_filepath   
+  audio_column: audio_filepath   # filepath string, not inline array
   text_column: normalized
   sampling_rate: 16000
+  feature_size: 128        # mel bins: 128 for large-v3, 80 for small/medium
   max_duration_secs: 30.0
   min_duration_secs: 0.1
   buffer_size: 5000
