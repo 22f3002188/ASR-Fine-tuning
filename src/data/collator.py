@@ -12,61 +12,45 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Union
 
 import torch
-from transformers import WhisperProcessor
 
 
 @dataclass
 class DataCollatorSpeechSeq2SeqWithPadding:
-    """
-    Matches the collator from fine_tune_whisper.ipynb exactly.
-
-    Args:
-        processor              : WhisperProcessor (wraps feature_extractor + tokenizer)
-        decoder_start_token_id : model.config.decoder_start_token_id
-                                 Used to strip the leading BOS token that the
-                                 Trainer appends automatically during generation.
-
-    Usage:
-        processor = WhisperProcessor.from_pretrained(model_name, language=..., task=...)
-        collator  = DataCollatorSpeechSeq2SeqWithPadding(
-                        processor=processor,
-                        decoder_start_token_id=model.config.decoder_start_token_id,
-                    )
-        trainer = Seq2SeqTrainer(..., data_collator=collator)
-    """
     processor: Any
     decoder_start_token_id: int
-    model_dtype: Any = None    # e.g. torch.float16 — cast input_features to match model weights
+    model_dtype: Any = None
 
     def __call__(
         self,
         features: List[Dict[str, Union[List[int], torch.Tensor]]],
     ) -> Dict[str, torch.Tensor]:
 
-        # ── Audio features ────────────────────────────────────────────────────
-        # Already fixed-length (30s = 3000 frames) — just stack into a tensor.
         input_features = [{"input_features": f["input_features"]} for f in features]
         batch = self.processor.feature_extractor.pad(input_features, return_tensors="pt")
 
-        # feature_extractor.pad() always returns float32. Cast to float16 here
-        # so it matches model weight dtype under DataParallel / bf16 training.
-        # The Trainer does this automatically in single-GPU mode but not always
-        # through DataParallel — doing it in the collator is the safe universal fix.
+        if not torch.isfinite(batch["input_features"]).all():
+            raise ValueError("NaN/Inf detected in input_features before model forward.")
+
         if self.model_dtype is not None:
             batch["input_features"] = batch["input_features"].to(self.model_dtype)
 
-        # ── Labels ────────────────────────────────────────────────────────────
-        # Pad to max length in this batch, then replace pad token id with -100.
         label_features = [{"input_ids": f["labels"]} for f in features]
-        labels_batch   = self.processor.tokenizer.pad(label_features, return_tensors="pt")
+        labels_batch = self.processor.tokenizer.pad(label_features, return_tensors="pt")
+
         labels = labels_batch["input_ids"].masked_fill(
             labels_batch.attention_mask.ne(1), -100
-        )
+        ).long()
 
-        # Strip BOS token from the start — the Trainer appends it automatically
-        # during generation, so having it in labels causes a length mismatch.
-        if (labels[:, 0] == self.decoder_start_token_id).all().cpu().item():
+        if labels.shape[1] > 1 and (labels[:, 0] == self.decoder_start_token_id).all().cpu().item():
             labels = labels[:, 1:]
+
+        valid_label_counts = labels.ne(-100).sum(dim=1)
+        if (valid_label_counts == 0).any().cpu().item():
+            bad_rows = (valid_label_counts == 0).nonzero(as_tuple=False).view(-1).tolist()
+            raise ValueError(
+                "Encountered samples with zero valid label tokens after padding/masking. "
+                f"Bad row indices: {bad_rows}"
+            )
 
         batch["labels"] = labels
         return batch

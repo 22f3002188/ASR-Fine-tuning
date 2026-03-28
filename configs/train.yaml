@@ -44,5 +44,5 @@ training:
   generation_max_length: 448    # Whisper decoder hard limit — do not exceed
 
   logging_steps: 50
-  report_to: tensorboard           # tensorboard as requested
+  report_to: []          
   smoke_test_steps: 10

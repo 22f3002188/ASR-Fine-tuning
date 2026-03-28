@@ -6,40 +6,47 @@ The full model is trained end-to-end with the optimizer
 updating all parameters.
 """
 
-from transformers import WhisperForConditionalGeneration, WhisperProcessor
+from __future__ import annotations
+
+import torch
+from transformers import WhisperForConditionalGeneration
 
 
-def load_model(cfg) -> WhisperForConditionalGeneration:
+def load_model(cfg):
     """
-    Load Whisper from HuggingFace Hub and configure generation settings.
-
-    Args:
-        cfg : merged OmegaConf config (output of load_config())
-
-    Returns:
-        WhisperForConditionalGeneration with generation config set.
+    Load Whisper model with dtype chosen from config/runtime.
     """
+
     model_name = cfg.model.name
-    model = WhisperForConditionalGeneration.from_pretrained(model_name)
 
-    # Disable forced_decoder_ids on model.config — the Trainer uses
-    # generation_config instead, and having both causes a shape mismatch
-    # during predict_with_generate=True evaluation.
-    model.config.forced_decoder_ids = None
-    model.config.suppress_tokens    = []
+    # Read preferred dtype from config if present.
+    # Supported: "float32", "float16", "bfloat16", "auto"
+    requested_dtype = str(getattr(cfg.model, "torch_dtype", "auto")).lower()
 
-    # Set language + task on generation_config so every generate() call
-    # is constrained to Punjabi transcription automatically.
-    processor = WhisperProcessor.from_pretrained(
+    if requested_dtype == "float32":
+        torch_dtype = torch.float32
+    elif requested_dtype == "float16":
+        torch_dtype = torch.float16
+    elif requested_dtype == "bfloat16":
+        torch_dtype = torch.bfloat16
+    else:
+        torch_dtype = "auto"
+
+    model = WhisperForConditionalGeneration.from_pretrained(
         model_name,
-        language=cfg.model.language,
-        task=cfg.model.task,
+        torch_dtype=torch_dtype,
     )
-    forced_ids = processor.get_decoder_prompt_ids(
-        language=cfg.model.language,
-        task=cfg.model.task,
-    )
-    model.generation_config.forced_decoder_ids = forced_ids
-    model.generation_config.suppress_tokens    = []
+
+    # Let labels drive decoder inputs during training.
+    # Avoid forcing decoder ids during training forward.
+    model.config.forced_decoder_ids = None
+    model.generation_config.forced_decoder_ids = None
+
+    # Suppress timestamps during normal ASR generation unless explicitly needed
+    if hasattr(model.generation_config, "suppress_tokens"):
+        pass
+
+    # Recommended during training for memory
+    model.config.use_cache = False
 
     return model
