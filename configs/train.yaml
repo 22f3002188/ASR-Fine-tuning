@@ -6,34 +6,23 @@ model:
 training:
   output_dir: checkpoints
   max_steps: 30000
+  smoke_test_steps: 10
+
+  per_device_train_batch_size: 2
+  per_device_eval_batch_size: 2
+  gradient_accumulation_steps: 2
+
+  learning_rate: 5e-6
   warmup_steps: 1000
 
-  per_device_train_batch_size: 16
-  per_device_eval_batch_size: 8
-  gradient_accumulation_steps: 4
-
-  learning_rate: 5.0e-6
-  lr_scheduler_type: linear
-  weight_decay: 0.01
+  logging_steps: 10
+  eval_steps: 2000
+  save_steps: 2000
 
   eval_strategy: steps
-  eval_steps: 2000
   save_strategy: steps
-  save_steps: 2000
-  save_total_limit: 3
 
-  load_best_model_at_end: true
-  metric_for_best_model: wer
-  greater_is_better: false
+  generation_max_length: 448
 
   bf16: true
   fp16: false
-  gradient_checkpointing: true
-  dataloader_num_workers: 0
-  dataloader_pin_memory: false
-
-  predict_with_generate: true
-  generation_max_length: 448
-  logging_steps: 50
-  report_to: none
-  smoke_test_steps: 10

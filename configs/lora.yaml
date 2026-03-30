@@ -1,17 +1,19 @@
-# LoRA is currently disabled — vanilla full finetuning is used instead.
-# Re-enable by setting enabled: true and wiring apply_lora() back into train.py.
 lora:
-  enabled: false
-  r: 32
-  lora_alpha: 64
+  enabled: true
+  r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  bias: "none"
+
+  # base module names to search for inside Whisper
   target_modules:
     - q_proj
     - v_proj
-  lora_dropout: 0.05
-  bias: none
+
+  # options: decoder_only, encoder_only, both
   apply_to: decoder_only
 
 freeze:
-  encoder: false
-  freeze_decoder_layers: 0
-  freeze_embed_positions: false
+  encoder: true
+  embed_positions: false
+  decoder_layers: 0

@@ -5,17 +5,20 @@ Loads:
 - .env (optional)
 - train.yaml
 - data.yaml
+- lora.yaml (optional but recommended)
 
 Applies:
 - HF token login
 - optional smoke test override
 """
 
+from __future__ import annotations
+
 import os
 from pathlib import Path
 
 from dotenv import load_dotenv
-from omegaconf import OmegaConf, DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 
 CONFIG_DIR = Path(__file__).parent.parent / "configs"
@@ -53,11 +56,26 @@ def _register_hf_token() -> None:
 
 
 def _load_yaml_configs(config_dir: Path) -> DictConfig:
-    """Load and merge train.yaml + data.yaml"""
+    """
+    Load and merge:
+    - train.yaml
+    - data.yaml
+    - lora.yaml (if present)
+
+    Merge order matters:
+    train <- data <- lora
+    """
     train_cfg = OmegaConf.load(config_dir / "train.yaml")
     data_cfg = OmegaConf.load(config_dir / "data.yaml")
 
-    return OmegaConf.merge(train_cfg, data_cfg)
+    cfgs = [train_cfg, data_cfg]
+
+    lora_path = config_dir / "lora.yaml"
+    if lora_path.exists():
+        lora_cfg = OmegaConf.load(lora_path)
+        cfgs.append(lora_cfg)
+
+    return OmegaConf.merge(*cfgs)
 
 
 def _apply_smoke_test(cfg: DictConfig) -> DictConfig:

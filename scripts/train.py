@@ -1,10 +1,12 @@
 """
-Whisper full fine-tuning (clean version).
+Whisper fine-tuning with optional LoRA.
 
 Run:
     SMOKE_TEST=true python scripts/train.py
     python scripts/train.py
 """
+
+from __future__ import annotations
 
 import os
 import sys
@@ -17,6 +19,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.config_loader import load_config
 from src.model.model import load_model
+from src.model.lora import apply_lora, print_trainable_parameters
+from src.model.freeze import apply_freeze
 from src.data.dataset import DataConfig, build_train_dataset, build_eval_dataset
 from src.data.collator import DataCollatorSpeechSeq2SeqWithPadding
 from src.training.trainer import WhisperTrainer
@@ -24,10 +28,10 @@ from src.evaluation.metrics import make_compute_metrics
 
 
 # ────────────────────────────────────────────────
-# Setup HF cache (once, clean)
+# Setup HF cache
 # ────────────────────────────────────────────────
 
-def setup_cache():
+def setup_cache() -> None:
     base = os.environ.get("HF_HOME", "/home/harsh/hf_cache")
 
     os.environ["HF_HOME"] = base
@@ -38,25 +42,26 @@ def setup_cache():
     Path(os.environ["HF_HOME"]).mkdir(parents=True, exist_ok=True)
     Path(os.environ["HF_HUB_CACHE"]).mkdir(parents=True, exist_ok=True)
     Path(os.environ["HF_DATASETS_CACHE"]).mkdir(parents=True, exist_ok=True)
+    Path(os.environ["TRANSFORMERS_CACHE"]).mkdir(parents=True, exist_ok=True)
 
 
 # ────────────────────────────────────────────────
 # Main
 # ────────────────────────────────────────────────
 
-def main():
+def main() -> None:
     setup_cache()
 
     cfg = load_config()
     t = cfg.training
     smoke = os.environ.get("SMOKE_TEST", "false").lower() == "true"
 
-    print(f"\n{'='*50}")
+    print(f"\n{'=' * 50}")
     print(" Whisper Finetuning")
     print(f" Model   : {cfg.model.name}")
     print(f" Dataset : {cfg.data.dataset_name} / {cfg.data.language}")
     print(f" Smoke   : {smoke}")
-    print(f"{'='*50}\n")
+    print(f"{'=' * 50}\n")
 
     # ── Device ─────────────────────────────────
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -79,8 +84,28 @@ def main():
 
     # ── Model ──────────────────────────────────
     print("Loading model...")
-    model = load_model(cfg).to(device)
+    model = load_model(cfg)
     model.config.use_cache = False
+
+    # Apply LoRA if enabled
+    if hasattr(cfg, "lora") and cfg.lora.get("enabled", False):
+        print("Applying LoRA adapters...")
+        model = apply_lora(model, cfg)
+        print("LoRA applied.\n")
+    else:
+        print("LoRA disabled.\n")
+
+    # Apply freezing if config exists
+    if hasattr(cfg, "freeze"):
+        print("Applying parameter freezing...")
+        apply_freeze(model, cfg)
+        print()
+
+    print("Parameter summary:")
+    print_trainable_parameters(model)
+    print()
+
+    model = model.to(device)
 
     # Precision
     use_bf16 = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
@@ -98,7 +123,7 @@ def main():
     data_cfg = DataConfig.from_omega(cfg)
 
     train_ds = build_train_dataset(data_cfg, processor, token=hf_token)
-    eval_ds  = build_eval_dataset(data_cfg, processor, token=hf_token)
+    eval_ds = build_eval_dataset(data_cfg, processor, token=hf_token)
 
     print("Dataset ready.\n")
 
@@ -155,10 +180,15 @@ def main():
 
     # ── Save ───────────────────────────────────
     save_path = Path(t.output_dir) / "final_model"
-    model.save_pretrained(save_path)
-    processor.save_pretrained(save_path)
+    save_path.mkdir(parents=True, exist_ok=True)
+
+    trainer.save_model(str(save_path))
+    processor.save_pretrained(str(save_path))
 
     print(f"\nModel saved → {save_path}")
+    # Hard exit to avoid native-library shutdown crash after successful training
+    os._exit(0)
+    
 
 
 if __name__ == "__main__":

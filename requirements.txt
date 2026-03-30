@@ -6,3 +6,9 @@ pyyaml
 librosa
 soundfile
 numpy
+python-dotenv
+omegaconf
+jiwer
+peft
+accelerate
+torchaudio

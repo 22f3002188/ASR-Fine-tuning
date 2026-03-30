@@ -1,22 +1,32 @@
 data:
   dataset_name: ai4bharat/IndicVoices
   language: punjabi
+
   split_train: train
   split_val: valid
+
   audio_column: audio
   text_column: normalized
   domain_column: task_name
+
   sampling_rate: 16000
   feature_size: 128
+
   min_duration_secs: 0.1
-  max_duration_secs: 30.0
-  shuffle_buffer_size: 5000
-  prefetch_size: 8
+  max_duration_secs: 8.0
+
+  shuffle_buffer_size: 500
+  prefetch_size: 4
   seed: 42
+
   normalization: basic
+
+  debug: true
+  debug_every: 10
+
   augmentation:
     enabled: true
     spec_augment: true
-    noise_prob: 0.3
-    speed_prob: 0.3
-    speed_range: [0.9, 1.1]
+    noise_prob: 0.1
+    speed_prob: 0.1
+    speed_range: [0.98, 1.02]
