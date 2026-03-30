@@ -66,7 +66,10 @@ def main():
         print("WARNING: No GPU — training in fp32 on CPU (smoke test only).\n")
 
     print(f"  Parameters : {sum(p.numel() for p in model.parameters()):,}")
-    print(f"  Precision  : {'bf16' if _use_bf16 else 'fp16' if _use_fp16 else 'fp32'}\n")
+    print(f"  Precision  : {'bf16' if _use_bf16 else 'fp16' if _use_fp16 else 'fp32'}")
+
+    gc_enabled = t.get("gradient_checkpointing", False) and _has_gpu
+    print(f"  Gradient checkpointing: {'enabled' if gc_enabled else 'disabled'}\n")
 
     # ── 3. Dataset ────────────────────────────────────────────────────────────
     print("Connecting to dataset (streaming)...")
@@ -138,6 +141,7 @@ def main():
     # During smoke test, cap eval at a small fixed number of batches so it
     # doesn't stream the entire eval split (which has no __len__).
     import itertools
+    smoke = os.environ.get("SMOKE_TEST", "false").lower() == "true"
     if smoke and eval_dataset is not None:
         smoke_eval_samples = t.get("smoke_test_steps", 10) * t.per_device_eval_batch_size
         eval_dataset = list(itertools.islice(iter(eval_dataset), smoke_eval_samples))
@@ -151,7 +155,7 @@ def main():
         data_collator=collator,
         compute_metrics=compute_metrics,
         callbacks=callbacks,
-        processing_class=processor.feature_extractor,
+        tokenizer=processor.feature_extractor,
     )
 
     # ── 9. Train ──────────────────────────────────────────────────────────────

@@ -34,7 +34,10 @@ training:
 
   bf16: true
   fp16: false
-  gradient_checkpointing: true     # large-v3 needs this
+  # Gradient checkpointing disabled — incompatible with this version of
+  # transformers/accelerate due to double-backward in the recomputation pass.
+  # To save VRAM instead: reduce per_device_train_batch_size to 4-8.
+  gradient_checkpointing: false
   # num_workers=0 is safest for streaming datasets on machines with limited /dev/shm.
   # Increase to 4-8 on machines with large shared memory (check: df -h /dev/shm).
   dataloader_num_workers: 0
