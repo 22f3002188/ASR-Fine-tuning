@@ -1,114 +1,104 @@
 """
-Step 2 entrypoint: validate the streaming data pipeline end-to-end.
-
-Streams a small number of samples through the full pipeline:
-  load → cast_column → decode_audio → filter → augment → feature extract
-  → tokenize → collate → batch shape check
+Evaluate trained Whisper model on validation set.
 
 Run:
-    python scripts/prepare_data.py
-    python scripts/prepare_data.py --n-train 100 --n-val 50
+    python scripts/evaluate.py
 """
 
-import argparse
+import os
 import sys
-import time
 from pathlib import Path
+
+import torch
+from datasets import load_dataset
+from transformers import WhisperProcessor
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from transformers import WhisperProcessor
-
 from src.config_loader import load_config
-from src.data.dataset import StreamingASRDataset, DataConfig
+from src.model.model import load_model
+from src.data.dataset import DataConfig, build_eval_dataset
 from src.data.collator import DataCollatorSpeechSeq2SeqWithPadding
-
-
-def parse_args():
-    p = argparse.ArgumentParser()
-    p.add_argument("--n-train", type=int, default=50)
-    p.add_argument("--n-val",   type=int, default=20)
-    return p.parse_args()
+from src.evaluation.metrics import make_compute_metrics
 
 
 def main():
-    args = parse_args()
-    cfg  = load_config()
+    cfg = load_config()
 
-    model_name = cfg.model.name
-    print(f"\n{'='*60}")
-    print(f"  Data pipeline validation")
-    print(f"  Dataset : {cfg.data.dataset_name} / {cfg.data.language}")
-    print(f"  Model   : {model_name}")
-    print(f"{'='*60}\n")
+    print(f"\n{'='*50}")
+    print(" Whisper Evaluation")
+    print(f" Model   : {cfg.model.name}")
+    print(f" Dataset : {cfg.data.dataset_name} / {cfg.data.language}")
+    print(f"{'='*50}\n")
 
-    # ── Processor (wraps feature_extractor + tokenizer) ───────────────────────
-    print("Loading WhisperProcessor...")
+    # ── Device ─────────────────────────────────
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # ── HF Token ───────────────────────────────
+    hf_token = os.environ.get("HF_TOKEN")
+    if not hf_token:
+        raise RuntimeError("HF_TOKEN not set.")
+
+    # ── Load processor ─────────────────────────
+    print("Loading processor...")
     processor = WhisperProcessor.from_pretrained(
-        model_name,
+        cfg.model.name,
         language=cfg.model.language,
         task=cfg.model.task,
+        cache_dir=os.environ.get("HF_HUB_CACHE"),
+        token=hf_token,
     )
 
-    # ── Dataset ───────────────────────────────────────────────────────────────
-    data_config = DataConfig.from_omega(cfg)
-    ds = StreamingASRDataset(
-        data_config,
-        processor.feature_extractor,
-        processor.tokenizer,
-    )
-    print("Connecting to IndicVoices (streaming)...")
-    ds.load()
-    print("Connected.\n")
+    # ── Load model (from checkpoint) ───────────
+    model_path = Path(cfg.training.output_dir) / "final_model"
 
-    # Collator needs decoder_start_token_id — load it from the processor
-    # (avoids loading the full model just for validation)
-    from transformers import WhisperConfig
-    model_cfg = WhisperConfig.from_pretrained(model_name)
-    collator = DataCollatorSpeechSeq2SeqWithPadding(
-        processor=processor,
-        decoder_start_token_id=model_cfg.decoder_start_token_id,
-    )
+    print(f"Loading model from {model_path} ...")
+    model = load_model(cfg)
+    model = model.from_pretrained(model_path).to(device)
+    model.eval()
 
-    # ── Validate splits ───────────────────────────────────────────────────────
-    for split, n, shuffle in [("train", args.n_train, True), ("val", args.n_val, False)]:
-        _validate_split(ds, collator, processor, split=split, n=n, shuffle=shuffle)
+    # ── Dataset ────────────────────────────────
+    print("Loading validation dataset...")
+    data_cfg = DataConfig.from_omega(cfg)
+    eval_ds = build_eval_dataset(data_cfg, processor, token=hf_token)
 
-    print("Pipeline validation complete. Safe to proceed to Step 3.\n")
+    print("Dataset ready.\n")
 
+    # ── Metrics ────────────────────────────────
+    compute_metrics = make_compute_metrics(processor.tokenizer)
 
-def _validate_split(ds, collator, processor, split, n, shuffle):
-    print(f"── {split.upper()}  ({n} samples) ──────────────────────────────")
-    t0 = time.time()
+    # ── Evaluation loop ────────────────────────
+    preds = []
+    refs = []
 
-    samples = ds.get_split_as_list(split, n_samples=n, shuffle=shuffle)
-    elapsed = time.time() - t0
+    print("Running evaluation...\n")
 
-    if not samples:
-        print("  ERROR: no valid samples returned. Check audio_column and dataset access.\n")
-        return
+    for i, sample in enumerate(eval_ds):
+        if i >= 200:   # limit for quick eval (increase later)
+            break
 
-    feat_shapes = [s["input_features"].shape for s in samples]
-    label_lens  = [len(s["labels"]) for s in samples]
+        input_features = torch.tensor(sample["input_features"]).unsqueeze(0).to(device)
 
-    print(f"  Loaded        : {len(samples)} samples in {elapsed:.1f}s")
-    print(f"  Feature shape : {feat_shapes[0]}  (expected: (80, 3000))")
-    print(f"  Label lengths : min={min(label_lens)}  max={max(label_lens)}  "
-          f"avg={sum(label_lens)/len(label_lens):.1f} tokens")
+        with torch.no_grad():
+            generated_ids = model.generate(input_features)
 
-    print(f"\n  Sample transcripts (decoded):")
-    for i, s in enumerate(samples[:3]):
-        text = processor.tokenizer.decode(s["labels"], skip_special_tokens=True)
-        print(f"    [{i}] {text[:80]}")
+        pred_text = processor.tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+        ref_text = processor.tokenizer.decode(sample["labels"], skip_special_tokens=True)
 
-    # Collation check
-    batch = collator(samples[:8])
-    print(f"\n  Collated batch:")
-    print(f"    input_features : {tuple(batch['input_features'].shape)}")
-    print(f"    labels         : {tuple(batch['labels'].shape)}")
-    n_pad = (batch["labels"] == -100).sum(dim=1).tolist()
-    print(f"    padding (-100) per sample: {n_pad}")
-    print()
+        preds.append(pred_text)
+        refs.append(ref_text)
+
+        if i < 3:
+            print(f"[Sample {i}]")
+            print(f"  REF : {ref_text}")
+            print(f"  PRED: {pred_text}\n")
+
+    # ── Compute metrics ────────────────────────
+    metrics = compute_metrics({"predictions": preds, "references": refs})
+
+    print("\nFinal Results:")
+    for k, v in metrics.items():
+        print(f"  {k}: {v:.4f}")
 
 
 if __name__ == "__main__":

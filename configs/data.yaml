@@ -3,21 +3,20 @@ data:
   language: punjabi
   split_train: train
   split_val: valid
-  audio_column: audio            # HF audio column (decoded by load_audio_manually)
+  audio_column: audio
   text_column: normalized
-  domain_column: task_name        # IndicVoices domain/task label column
+  domain_column: task_name
   sampling_rate: 16000
-  feature_size: 128        # mel bins: 128 for large-v3, 80 for small/medium
-  max_duration_secs: 30.0
+  feature_size: 128
   min_duration_secs: 0.1
-  buffer_size: 5000
+  max_duration_secs: 30.0
   shuffle_buffer_size: 5000
   prefetch_size: 8
   seed: 42
+  normalization: basic
   augmentation:
     enabled: true
     spec_augment: true
     noise_prob: 0.3
     speed_prob: 0.3
     speed_range: [0.9, 1.1]
-  normalization: basic
