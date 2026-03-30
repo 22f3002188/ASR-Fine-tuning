@@ -41,7 +41,7 @@ training:
   dataloader_pin_memory: false
 
   predict_with_generate: true
-  generation_max_length: 448    # Whisper decoder hard limit — do not exceed
+  generation_max_length: 444    # Whisper decoder hard limit — do not exceed
 
   logging_steps: 50
   report_to: []          
