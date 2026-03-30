@@ -12,6 +12,8 @@ import os
 import sys
 import subprocess
 from pathlib import Path
+import socket
+import mlflow
 
 if "CUDA_VISIBLE_DEVICES" not in os.environ:
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
@@ -114,6 +116,45 @@ def _normalize_report_to(report_to_value):
     return "none"
 
 
+# === NEW: helper to make report_to always include mlflow ===
+def _ensure_mlflow_in_report_to(report_to_value):
+    normalized = _normalize_report_to(report_to_value)
+
+    if normalized == "none":
+        return ["mlflow"]
+
+    if isinstance(normalized, str):
+        normalized = [normalized]
+
+    cleaned = []
+    seen = set()
+    for item in normalized:
+        key = str(item).strip().lower()
+        if key and key not in seen:
+            cleaned.append(str(item).strip())
+            seen.add(key)
+
+    if "mlflow" not in seen:
+        cleaned.append("mlflow")
+
+    return cleaned
+
+# === NEW: helper to build a readable run name ===
+def _build_run_name(cfg, smoke: bool):
+    model_name = str(cfg.model.name).split("/")[-1]
+    suffix = "smoke" if smoke else "full"
+    return f"{cfg.data.language}_{model_name}_{suffix}"
+
+
+# === NEW: helper to safely extract scalar metrics ===
+def _numeric_metrics_only(metrics: dict):
+    clean = {}
+    for k, v in metrics.items():
+        if isinstance(v, (int, float)):
+            clean[k] = v
+    return clean
+
+
 def main():
     cfg = load_config()
     t = cfg.training
@@ -183,8 +224,24 @@ def main():
 
     compute_metrics = make_compute_metrics(processor.tokenizer)
 
-    report_to_value = _normalize_report_to(getattr(t, "report_to", None))
+    # === MODIFIED: always include MLflow in report_to ===
+    report_to_value = _ensure_mlflow_in_report_to(getattr(t, "report_to", None))
     print(f"Reporting integrations: {report_to_value}\n")
+
+    # === NEW: MLflow tracking config ===
+    mlflow_tracking_uri = os.getenv("MLFLOW_TRACKING_URI", "file:./mlruns")
+    mlflow_experiment_name = os.getenv(
+        "MLFLOW_EXPERIMENT_NAME",
+        "whisper-asr-finetuning",
+    )
+    run_name = _build_run_name(cfg, smoke)
+
+    mlflow.set_tracking_uri(mlflow_tracking_uri)
+    mlflow.set_experiment(mlflow_experiment_name)
+
+    print(f"MLflow tracking URI : {mlflow_tracking_uri}")
+    print(f"MLflow experiment   : {mlflow_experiment_name}")
+    print(f"MLflow run name     : {run_name}\n")
 
     training_args = Seq2SeqTrainingArguments(
         output_dir=t.output_dir,
@@ -217,7 +274,8 @@ def main():
         generation_max_length=t.generation_max_length,
 
         logging_steps=1 if smoke else t.logging_steps,
-        report_to=report_to_value,
+        report_to=report_to_value, # === MODIFIED: Trainer now reports to MLflow ===
+        run_name=run_name, # === NEW: visible run name in HF/MLflow integrations ===
         remove_unused_columns=False,
         max_grad_norm=1.0,
     )
@@ -238,13 +296,75 @@ def main():
         processing_class=processor.feature_extractor,
     )
 
-    print("Starting training...\n")
-    trainer.train()
+    # === NEW: wrap the full training flow inside an MLflow run ===
+    with mlflow.start_run(run_name=run_name, log_system_metrics=True):
+        # === NEW: log high-value tags ===
+        mlflow.set_tags(
+            {
+                "project": "ASR-Fine-tuning",
+                "task": "automatic-speech-recognition",
+                "framework": "huggingface-transformers",
+                "model_family": "whisper",
+                "model_name": str(cfg.model.name),
+                "dataset_name": str(cfg.data.dataset_name),
+                "language": str(cfg.data.language),
+                "smoke_test": str(smoke),
+                "host": socket.gethostname(),
+            }
+        )
 
-    final_dir = Path(t.output_dir) / "final_model"
-    model.save_pretrained(final_dir)
-    processor.save_pretrained(final_dir)
-    print(f"\nModel saved → {final_dir}")
+        # === NEW: log important params once at run start ===
+        mlflow.log_params(
+            {
+                "model_name": str(cfg.model.name),
+                "model_language": str(cfg.model.language),
+                "model_task": str(cfg.model.task),
+                "dataset_name": str(cfg.data.dataset_name),
+                "dataset_language": str(cfg.data.language),
+                "feature_size": int(cfg.data.get("feature_size", 128)),
+                "output_dir": str(t.output_dir),
+                "learning_rate": float(t.learning_rate),
+                "lr_scheduler_type": str(t.lr_scheduler_type),
+                "weight_decay": float(t.weight_decay),
+                "max_steps": int(t.max_steps),
+                "warmup_steps": int(t.warmup_steps),
+                "per_device_train_batch_size": int(train_bs),
+                "per_device_eval_batch_size": int(eval_bs),
+                "gradient_accumulation_steps": int(grad_accum),
+                "bf16": bool(use_bf16),
+                "fp16": bool(use_fp16),
+                "gradient_checkpointing": True,
+                "predict_with_generate": bool(
+                    False if smoke else t.predict_with_generate
+                ),
+                "generation_max_length": int(t.generation_max_length),
+                "logging_steps": int(1 if smoke else t.logging_steps),
+            }
+        )
+
+        print("Starting training...\n")
+        trainer.train()
+
+        # === NEW: run one final evaluation and log final scalar metrics ===
+        if not smoke:
+            print("\nRunning final evaluation for MLflow logging...\n")
+            final_metrics = trainer.evaluate()
+            mlflow.log_metrics(
+                {
+                    f"final_{k}": v
+                    for k, v in _numeric_metrics_only(final_metrics).items()
+                }
+            )
+            print(f"Final eval metrics: {final_metrics}")
+
+        final_dir = Path(t.output_dir) / "final_model"
+        model.save_pretrained(final_dir)
+        processor.save_pretrained(final_dir)
+
+        # === NEW: log final model directory as MLflow artifact ===
+        mlflow.log_artifacts(str(final_dir), artifact_path="final_model")
+
+        print(f"\nModel saved → {final_dir}")
 
 
 if __name__ == "__main__":
