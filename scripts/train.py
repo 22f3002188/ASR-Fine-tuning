@@ -1,9 +1,5 @@
 """
 Whisper fine-tuning with optional LoRA.
-
-Run:
-    SMOKE_TEST=true python scripts/train.py
-    python scripts/train.py
 """
 
 from __future__ import annotations
@@ -63,13 +59,11 @@ def main() -> None:
     print(f" Smoke   : {smoke}")
     print(f"{'=' * 50}\n")
 
-    # ── Device ─────────────────────────────────
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # ── HF Token ───────────────────────────────
     hf_token = os.environ.get("HF_TOKEN")
     if not hf_token:
-        raise RuntimeError("HF_TOKEN not set (IndicVoices is gated).")
+        raise RuntimeError("HF_TOKEN not set.")
 
     # ── Processor ──────────────────────────────
     print("Loading processor...")
@@ -77,7 +71,6 @@ def main() -> None:
         cfg.model.name,
         language=cfg.model.language,
         task=cfg.model.task,
-        feature_size=cfg.data.get("feature_size", 128),
         token=hf_token,
         cache_dir=os.environ["HF_HUB_CACHE"],
     )
@@ -87,15 +80,11 @@ def main() -> None:
     model = load_model(cfg)
     model.config.use_cache = False
 
-    # Apply LoRA if enabled
     if hasattr(cfg, "lora") and cfg.lora.get("enabled", False):
         print("Applying LoRA adapters...")
         model = apply_lora(model, cfg)
         print("LoRA applied.\n")
-    else:
-        print("LoRA disabled.\n")
 
-    # Apply freezing if config exists
     if hasattr(cfg, "freeze"):
         print("Applying parameter freezing...")
         apply_freeze(model, cfg)
@@ -125,6 +114,13 @@ def main() -> None:
     train_ds = build_train_dataset(data_cfg, processor, token=hf_token)
     eval_ds = build_eval_dataset(data_cfg, processor, token=hf_token)
 
+    if eval_ds is None:
+        print("⚠️ No validation dataset found → disabling evaluation\n")
+        eval_strategy = "no"
+        eval_ds = None
+    else:
+        eval_strategy = t.eval_strategy
+
     print("Dataset ready.\n")
 
     # ── Collator ───────────────────────────────
@@ -134,7 +130,6 @@ def main() -> None:
         model_dtype=next(model.parameters()).dtype,
     )
 
-    # ── Metrics ────────────────────────────────
     compute_metrics = make_compute_metrics(processor.tokenizer)
 
     # ── Training args ──────────────────────────
@@ -149,7 +144,7 @@ def main() -> None:
         learning_rate=t.learning_rate,
         warmup_steps=t.warmup_steps,
 
-        eval_strategy="no" if smoke else t.eval_strategy,
+        eval_strategy="no" if smoke else eval_strategy,
         save_strategy="no" if smoke else t.save_strategy,
 
         bf16=use_bf16,
@@ -168,13 +163,12 @@ def main() -> None:
         model=model,
         args=training_args,
         train_dataset=train_ds,
-        eval_dataset=eval_ds,
+        eval_dataset=eval_ds if eval_strategy != "no" else None,
         data_collator=collator,
         compute_metrics=compute_metrics,
         processing_class=processor.feature_extractor,
     )
 
-    # ── Train ──────────────────────────────────
     print("Starting training...\n")
     trainer.train()
 
@@ -186,9 +180,7 @@ def main() -> None:
     processor.save_pretrained(str(save_path))
 
     print(f"\nModel saved → {save_path}")
-    # Hard exit to avoid native-library shutdown crash after successful training
     os._exit(0)
-    
 
 
 if __name__ == "__main__":
