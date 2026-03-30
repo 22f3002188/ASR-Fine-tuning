@@ -39,15 +39,15 @@ except Exception:
 SAMPLE_RATE = 16_000
 
 # Debug verbosity — set to 0 in production to silence
-DEBUG_PROGRESS_EVERY             = 50
-DEBUG_PRINT_RAW_DOMAINS          = True
-DEBUG_RAW_DOMAIN_PRINT_LIMIT     = 20
-DEBUG_PRINT_SKIP_REASONS         = True
-DEBUG_SKIP_REASON_PRINT_LIMIT    = 30
-DEBUG_PRINT_SUCCESS_SAMPLES      = True
-DEBUG_SUCCESS_PRINT_LIMIT        = 20
+DEBUG_PROGRESS_EVERY = 50
+DEBUG_PRINT_RAW_DOMAINS = True
+DEBUG_RAW_DOMAIN_PRINT_LIMIT = 20
+DEBUG_PRINT_SKIP_REASONS = True
+DEBUG_SKIP_REASON_PRINT_LIMIT = 30
+DEBUG_PRINT_SUCCESS_SAMPLES = True
+DEBUG_SUCCESS_PRINT_LIMIT = 20
 DEBUG_PRINT_SAMPLE_KEYS_FOR_MISSING_AUDIO = True
-DEBUG_SAMPLE_KEYS_PRINT_LIMIT    = 10
+DEBUG_SAMPLE_KEYS_PRINT_LIMIT = 10
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -56,31 +56,32 @@ DEBUG_SAMPLE_KEYS_PRINT_LIMIT    = 10
 class DataConfig:
     dataset_name: str
     language: str
-    split_train: str        = "train"
-    split_val: str          = "valid"
-    audio_column: str       = "audio"
-    text_column: str        = "normalized"
-    domain_column: str      = "task_name"
-    sampling_rate: int      = SAMPLE_RATE
-    feature_size: int       = 128          # mel bins: 128 for large-v3, 80 for others
+    split_train: str = "train"
+    split_val: str = "valid"
+    audio_column: str = "audio"
+    text_column: str = "normalized"
+    domain_column: str = "task_name"
+    sampling_rate: int = SAMPLE_RATE
+    feature_size: int = 128
     min_duration_secs: float = 1.0
     max_duration_secs: float = 30.0
-    buffer_size: int        = 500          # alias kept for config compat
+    buffer_size: int = 500
     shuffle_buffer_size: int = 500
-    prefetch_size: int      = 8
-    seed: int               = 42
-    augmentation: dict      = field(default_factory=dict)
-    normalization: str      = "basic"
+    prefetch_size: int = 8
+    seed: int = 42
+    augmentation: dict = field(default_factory=dict)
+    normalization: str = "basic"
 
     @classmethod
     def from_omega(cls, cfg) -> "DataConfig":
         import dataclasses
         from omegaconf import OmegaConf
+
         raw = OmegaConf.to_container(cfg.data, resolve=True)
-        # buffer_size → shuffle_buffer_size alias
+
         if "buffer_size" in raw and "shuffle_buffer_size" not in raw:
             raw["shuffle_buffer_size"] = raw["buffer_size"]
-        # Drop unknown keys — prevents crashes on config/code drift
+
         valid = {f.name for f in dataclasses.fields(cls)}
         return cls(**{k: v for k, v in raw.items() if k in valid})
 
@@ -125,6 +126,36 @@ def safe_domain(sample: dict[str, Any], domain_column: str) -> str:
     return value if value else "unknown_domain"
 
 
+# ── Cache helpers ─────────────────────────────────────────────────────────────
+
+def _ensure_hf_cache_env() -> None:
+    """
+    Force all Hugging Face caches to writable user paths.
+    This avoids accidental writes to read-only system paths like /models/huggingface.
+    """
+    hf_home = os.getenv("HF_HOME", "/home/harsh/hf_cache")
+    hf_hub_cache = os.getenv("HF_HUB_CACHE", os.path.join(hf_home, "hub"))
+    hf_datasets_cache = os.getenv("HF_DATASETS_CACHE", os.path.join(hf_home, "datasets"))
+    hf_transformers_cache = os.getenv("TRANSFORMERS_CACHE", os.path.join(hf_home, "transformers"))
+    hf_assets_cache = os.getenv("HUGGINGFACE_ASSETS_CACHE", os.path.join(hf_home, "assets"))
+
+    os.environ["HF_HOME"] = hf_home
+    os.environ["HF_HUB_CACHE"] = hf_hub_cache
+    os.environ["HF_DATASETS_CACHE"] = hf_datasets_cache
+    os.environ["HUGGINGFACE_HUB_CACHE"] = hf_hub_cache
+    os.environ["TRANSFORMERS_CACHE"] = hf_transformers_cache
+    os.environ["HUGGINGFACE_ASSETS_CACHE"] = hf_assets_cache
+
+    for path in [
+        hf_home,
+        hf_hub_cache,
+        hf_datasets_cache,
+        hf_transformers_cache,
+        hf_assets_cache,
+    ]:
+        os.makedirs(path, exist_ok=True)
+
+
 # ── Dataset loading ───────────────────────────────────────────────────────────
 
 def open_stream(
@@ -132,17 +163,21 @@ def open_stream(
     split_name: str,
     token: Optional[str] = None,
 ):
-    """Open a raw streaming split. No cast_column — audio is decoded manually."""
+    """
+    Open a raw streaming split. No cast_column — audio is decoded manually.
+    """
+    _ensure_hf_cache_env()
+    token = token or os.getenv("HF_TOKEN")
+
     ds = load_dataset(
         config.dataset_name,
         config.language,
         split=split_name,
         streaming=True,
-        trust_remote_code=True,
         token=token,
+        cache_dir=os.environ["HF_DATASETS_CACHE"],
     )
 
-    # Disable automatic decoding so we get raw bytes/paths we can handle ourselves
     try:
         ds = ds.decode(False)
     except Exception:
@@ -165,7 +200,6 @@ def _load_from_path(audio_path: str, target_sr: int) -> Optional[tuple]:
 
 
 def _load_from_bytes(audio_bytes: bytes, target_sr: int) -> Optional[tuple]:
-    # Try soundfile first (fast)
     try:
         with io.BytesIO(audio_bytes) as bio:
             arr, sr = sf.read(bio, dtype="float32")
@@ -179,7 +213,6 @@ def _load_from_bytes(audio_bytes: bytes, target_sr: int) -> Optional[tuple]:
     except Exception:
         pass
 
-    # Fallback: write to temp file and use librosa
     tmp_path = None
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".audio") as tmp:
@@ -198,11 +231,20 @@ def _load_from_bytes(audio_bytes: bytes, target_sr: int) -> Optional[tuple]:
 
 
 def extract_audio_candidate(sample: dict[str, Any], preferred_key: str) -> Optional[Any]:
-    """Try preferred key first, then fall back through common audio column names."""
     candidate_keys = [
-        preferred_key, "audio", "audio_path", "audio_filepath", "audio_file",
-        "audio_filename", "file_path", "filepath", "path", "file",
-        "wav_path", "mp3_path", "flac_path",
+        preferred_key,
+        "audio",
+        "audio_path",
+        "audio_filepath",
+        "audio_file",
+        "audio_filename",
+        "file_path",
+        "filepath",
+        "path",
+        "file",
+        "wav_path",
+        "mp3_path",
+        "flac_path",
     ]
     seen = set()
     for key in candidate_keys:
@@ -217,20 +259,19 @@ def extract_audio_candidate(sample: dict[str, Any], preferred_key: str) -> Optio
 def load_audio_manually(audio_obj: Any, target_sr: int) -> Optional[tuple]:
     """
     Decode audio from any format IndicVoices may provide:
-      - dict {"array": ndarray, "sampling_rate": int}   — cast_column output
-      - dict {"path": str, "bytes": bytes}               — raw HF audio dict
-      - str                                               — filepath
-      - torchcodec AudioDecoder                           — raw streaming object
+      - dict {"array": ndarray, "sampling_rate": int}
+      - dict {"path": str, "bytes": bytes}
+      - str filepath
+      - torchcodec AudioDecoder
     """
     if audio_obj is None:
         return None
 
     if isinstance(audio_obj, dict):
-        # Cast_column output or HF audio dict with array already decoded
         if "array" in audio_obj and audio_obj["array"] is not None:
             try:
                 arr = audio_obj["array"]
-                sr  = int(audio_obj.get("sampling_rate", target_sr))
+                sr = int(audio_obj.get("sampling_rate", target_sr))
                 if getattr(arr, "ndim", 1) > 1:
                     arr = arr.mean(axis=1)
                 if sr != target_sr:
@@ -239,8 +280,7 @@ def load_audio_manually(audio_obj: Any, target_sr: int) -> Optional[tuple]:
             except Exception:
                 pass
 
-        # Raw HF audio dict with path/bytes
-        path  = audio_obj.get("path")
+        path = audio_obj.get("path")
         audio_bytes = audio_obj.get("bytes")
         if path:
             loaded = _load_from_path(path, target_sr)
@@ -253,7 +293,6 @@ def load_audio_manually(audio_obj: Any, target_sr: int) -> Optional[tuple]:
     if isinstance(audio_obj, str):
         return _load_from_path(audio_obj, target_sr)
 
-    # torchcodec AudioDecoder fallback
     try:
         decoded = audio_obj.get_all_samples()
         arr = decoded.data.squeeze(0).numpy().astype("float32")
@@ -295,46 +334,41 @@ def preprocess_sample(
     if duration > config.max_duration_secs:
         return None, "too_long"
 
-    # Waveform augmentation
     if augment and augmentor is not None:
         try:
             arr = augmentor.augment_waveform(arr)
         except Exception:
             pass
 
-    # Log-mel feature extraction
     try:
         input_features = processor.feature_extractor(
-            arr, sampling_rate=sr,
+            arr,
+            sampling_rate=sr,
         ).input_features[0]
     except Exception:
         return None, "feature_extraction_failed"
 
-    # SpecAugment on features
     if augment and augmentor is not None:
         try:
             input_features = augmentor.augment_features(input_features)
         except Exception:
             pass
 
-    # Tokenise
     try:
         labels = processor.tokenizer(transcript).input_ids
     except Exception:
         return None, "tokenization_failed"
 
-    # Whisper's decoder hard limit is 448 tokens — drop anything longer.
-    # IndicVoices has very long transcripts (paragraphs) that exceed this.
     if len(labels) > 448:
         return None, "labels_too_long"
 
     return {
         "input_features": input_features,
-        "labels":         labels,
-        "text":           transcript,
-        "duration":       duration,
-        "domain":         safe_domain(sample, config.domain_column),
-        "language":       config.language,
+        "labels": labels,
+        "text": transcript,
+        "duration": duration,
+        "domain": safe_domain(sample, config.domain_column),
+        "language": config.language,
     }, "kept"
 
 
@@ -343,7 +377,7 @@ def preprocess_sample(
 class StreamingASRDataset(TorchIterableDataset):
     """
     PyTorch IterableDataset wrapping IndicVoices streaming splits.
-    Compatible with Seq2SeqTrainer directly — no HF IterableDataset wrapper needed.
+    Compatible with Seq2SeqTrainer directly.
     """
 
     def __init__(
@@ -354,10 +388,10 @@ class StreamingASRDataset(TorchIterableDataset):
         token: Optional[str] = None,
     ) -> None:
         super().__init__()
-        self.config     = config
-        self.processor  = processor
+        self.config = config
+        self.processor = processor
         self.split_name = split_name
-        self.token      = token
+        self.token = token
 
         aug_cfg = config.augmentation or {}
         self.augmentor = None
@@ -377,7 +411,7 @@ class StreamingASRDataset(TorchIterableDataset):
         total_seen = total_kept = total_skipped = 0
         raw_domain_printed = skip_reason_printed = success_printed = sample_keys_printed = 0
         reason_counts: dict[str, int] = {}
-        is_train = (self.split_name == self.config.split_train)
+        is_train = self.split_name == self.config.split_train
 
         for sample in ds:
             total_seen += 1
@@ -389,8 +423,11 @@ class StreamingASRDataset(TorchIterableDataset):
 
             try:
                 processed, reason = preprocess_sample(
-                    sample, self.config, self.processor,
-                    augmentor=self.augmentor, augment=is_train,
+                    sample,
+                    self.config,
+                    self.processor,
+                    augmentor=self.augmentor,
+                    augment=is_train,
                 )
             except Exception as e:
                 processed, reason = None, "exception"
@@ -411,6 +448,7 @@ class StreamingASRDataset(TorchIterableDataset):
                         flush=True,
                     )
                     skip_reason_printed += 1
+
                 if (
                     reason == "missing_audio_field"
                     and DEBUG_PRINT_SAMPLE_KEYS_FOR_MISSING_AUDIO
@@ -421,6 +459,7 @@ class StreamingASRDataset(TorchIterableDataset):
             else:
                 total_kept += 1
                 buffer.append(processed)
+
                 if DEBUG_PRINT_SUCCESS_SAMPLES and success_printed < DEBUG_SUCCESS_PRINT_LIMIT:
                     print(
                         f"[KEPT] domain={repr(processed['domain'])} | "
@@ -442,7 +481,6 @@ class StreamingASRDataset(TorchIterableDataset):
                 while buffer:
                     yield buffer.pop()
 
-        # Flush remaining
         if buffer:
             random.shuffle(buffer)
             while buffer:
@@ -463,8 +501,10 @@ def build_train_dataset(
     token: Optional[str] = None,
 ) -> StreamingASRDataset:
     return StreamingASRDataset(
-        config=config, processor=processor,
-        split_name=config.split_train, token=token,
+        config=config,
+        processor=processor,
+        split_name=config.split_train,
+        token=token,
     )
 
 
@@ -476,8 +516,10 @@ def build_eval_dataset(
     try:
         open_stream(config, config.split_val, token=token)
         return StreamingASRDataset(
-            config=config, processor=processor,
-            split_name=config.split_val, token=token,
+            config=config,
+            processor=processor,
+            split_name=config.split_val,
+            token=token,
         )
     except Exception:
         return None

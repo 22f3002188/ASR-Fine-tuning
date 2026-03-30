@@ -5,7 +5,6 @@ All parameters are updated end-to-end.
 Run:
     SMOKE_TEST=true python scripts/train.py   # 10-step check
     python scripts/train.py                   # full training
-
 """
 
 import os
@@ -13,10 +12,38 @@ import sys
 import subprocess
 from pathlib import Path
 
+# ---------------------------------------------------------------------
+# Force Hugging Face caches to writable user paths BEFORE other imports
+# ---------------------------------------------------------------------
+HF_HOME = os.environ.get("HF_HOME", "/home/harsh/hf_cache")
+HF_HUB_CACHE = os.environ.get("HF_HUB_CACHE", f"{HF_HOME}/hub")
+HF_DATASETS_CACHE = os.environ.get("HF_DATASETS_CACHE", f"{HF_HOME}/datasets")
+HF_TRANSFORMERS_CACHE = os.environ.get("TRANSFORMERS_CACHE", f"{HF_HOME}/transformers")
+HF_ASSETS_CACHE = os.environ.get("HUGGINGFACE_ASSETS_CACHE", f"{HF_HOME}/assets")
+
+os.environ["HF_HOME"] = HF_HOME
+os.environ["HF_HUB_CACHE"] = HF_HUB_CACHE
+os.environ["HF_DATASETS_CACHE"] = HF_DATASETS_CACHE
+os.environ["HUGGINGFACE_HUB_CACHE"] = HF_HUB_CACHE
+os.environ["TRANSFORMERS_CACHE"] = HF_TRANSFORMERS_CACHE
+os.environ["HUGGINGFACE_ASSETS_CACHE"] = HF_ASSETS_CACHE
+
+for path in [
+    HF_HOME,
+    HF_HUB_CACHE,
+    HF_DATASETS_CACHE,
+    HF_TRANSFORMERS_CACHE,
+    HF_ASSETS_CACHE,
+]:
+    os.makedirs(path, exist_ok=True)
+
+# ---------------------------------------------------------------------
+# Runtime env
+# ---------------------------------------------------------------------
 if "CUDA_VISIBLE_DEVICES" not in os.environ:
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
 
 import torch
 from transformers import Seq2SeqTrainingArguments, WhisperProcessor
@@ -93,9 +120,6 @@ def _check_model_has_finite_params(model):
 
 
 def _normalize_report_to(report_to_value):
-    """
-    Make report_to compatible across transformers versions.
-    """
     if report_to_value is None:
         return "none"
 
@@ -124,6 +148,9 @@ def main():
     print(f"  Model   : {cfg.model.name}")
     print(f"  Dataset : {cfg.data.dataset_name} / {cfg.data.language}")
     print(f"  Smoke   : {smoke}")
+    print(f"  HF_HOME : {os.environ.get('HF_HOME')}")
+    print(f"  HF_DATASETS_CACHE : {os.environ.get('HF_DATASETS_CACHE')}")
+    print(f"  HF_HUB_CACHE      : {os.environ.get('HF_HUB_CACHE')}")
     print(f"{'='*60}\n")
 
     _ensure_gpu_has_headroom(min_free_gb=20.0 if smoke else 35.0)
@@ -131,12 +158,20 @@ def main():
     has_gpu = torch.cuda.is_available()
     supports_bf16 = has_gpu and torch.cuda.is_bf16_supported()
 
+    hf_token = os.environ.get("HF_TOKEN")
+    if not hf_token:
+        raise RuntimeError(
+            "HF_TOKEN is not set. IndicVoices is gated, so export HF_TOKEN before running."
+        )
+
     print("Loading processor...")
     processor = WhisperProcessor.from_pretrained(
         cfg.model.name,
         language=cfg.model.language,
         task=cfg.model.task,
         feature_size=cfg.data.get("feature_size", 128),
+        token=hf_token,
+        cache_dir=os.environ["HF_HUB_CACHE"],
     )
 
     print("Loading model...")
@@ -149,18 +184,27 @@ def main():
         train_bs = 1
         eval_bs = 1
         grad_accum = 1
+        use_gradient_checkpointing = False
 
         print("[SMOKE TEST] Low-VRAM settings enabled.")
+        print("[SMOKE TEST] Gradient checkpointing disabled.")
     else:
         use_bf16 = bool(t.bf16 and has_gpu)
-        use_fp16 = bool(t.fp16 and has_gpu and not use_bf16)
+        use_fp16 = bool(getattr(t, "fp16", False) and has_gpu and not use_bf16)
 
         train_bs = t.per_device_train_batch_size
         eval_bs = t.per_device_eval_batch_size
         grad_accum = t.gradient_accumulation_steps
+        use_gradient_checkpointing = True
 
     model = _convert_model_precision_for_run(model, use_bf16=use_bf16, use_fp16=use_fp16)
     model.config.use_cache = False
+
+    if use_gradient_checkpointing:
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+    else:
+        model.gradient_checkpointing_disable()
+
     _check_model_has_finite_params(model)
 
     print(f"Run precision: {'bf16' if use_bf16 else 'fp16' if use_fp16 else 'fp32'}")
@@ -168,7 +212,6 @@ def main():
 
     print("Connecting to dataset (streaming)...")
     data_config = DataConfig.from_omega(cfg)
-    hf_token = os.environ.get("HF_TOKEN")
 
     train_dataset = build_train_dataset(data_config, processor, token=hf_token)
     eval_dataset = build_eval_dataset(data_config, processor, token=hf_token)
@@ -209,7 +252,8 @@ def main():
 
         bf16=use_bf16,
         fp16=use_fp16,
-        gradient_checkpointing=True,
+        gradient_checkpointing=use_gradient_checkpointing,
+        gradient_checkpointing_kwargs={"use_reentrant": False} if use_gradient_checkpointing else None,
         dataloader_num_workers=0,
         dataloader_pin_memory=False,
 
