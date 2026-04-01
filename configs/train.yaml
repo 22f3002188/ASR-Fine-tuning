@@ -17,8 +17,9 @@ training:
   per_device_eval_batch_size: 8
   gradient_accumulation_steps: 4
 
-  # 2e-5 causes gradient underflow in bf16 during warmup on large-v3.
-  # Whisper paper recommends ~1e-5 max for large models; 5e-6 is safer.
+  # Vanilla FT: 5e-6 (safe for full model updates in bf16)
+  # BAFT mode : 3e-4 (recommended by Liu et al. 2024 — adapters train faster)
+  # Switch learning_rate when toggling baft.enabled in lora.yaml
   learning_rate: 5.0e-6
   lr_scheduler_type: linear
   weight_decay: 0.01
@@ -34,15 +35,18 @@ training:
 
   bf16: true
   fp16: false
-  gradient_checkpointing: true     # large-v3 needs this
+  # Gradient checkpointing disabled — incompatible with this version of
+  # transformers/accelerate due to double-backward in the recomputation pass.
+  # To save VRAM instead: reduce per_device_train_batch_size to 4-8.
+  gradient_checkpointing: false
   # num_workers=0 is safest for streaming datasets on machines with limited /dev/shm.
   # Increase to 4-8 on machines with large shared memory (check: df -h /dev/shm).
   dataloader_num_workers: 0
   dataloader_pin_memory: false
 
   predict_with_generate: true
-  generation_max_length: 444    # Whisper decoder hard limit — do not exceed
+  generation_max_length: 448    # Whisper decoder hard limit — do not exceed
 
   logging_steps: 50
-  report_to: []          
+  report_to: tensorboard           # tensorboard as requested
   smoke_test_steps: 10

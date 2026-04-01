@@ -13,31 +13,6 @@ import subprocess
 from pathlib import Path
 
 # ---------------------------------------------------------------------
-# Force Hugging Face caches to writable user paths BEFORE other imports
-# ---------------------------------------------------------------------
-HF_HOME = os.environ.get("HF_HOME", "/home/harsh/hf_cache")
-HF_HUB_CACHE = os.environ.get("HF_HUB_CACHE", f"{HF_HOME}/hub")
-HF_DATASETS_CACHE = os.environ.get("HF_DATASETS_CACHE", f"{HF_HOME}/datasets")
-HF_TRANSFORMERS_CACHE = os.environ.get("TRANSFORMERS_CACHE", f"{HF_HOME}/transformers")
-HF_ASSETS_CACHE = os.environ.get("HUGGINGFACE_ASSETS_CACHE", f"{HF_HOME}/assets")
-
-os.environ["HF_HOME"] = HF_HOME
-os.environ["HF_HUB_CACHE"] = HF_HUB_CACHE
-os.environ["HF_DATASETS_CACHE"] = HF_DATASETS_CACHE
-os.environ["HUGGINGFACE_HUB_CACHE"] = HF_HUB_CACHE
-os.environ["TRANSFORMERS_CACHE"] = HF_TRANSFORMERS_CACHE
-os.environ["HUGGINGFACE_ASSETS_CACHE"] = HF_ASSETS_CACHE
-
-for path in [
-    HF_HOME,
-    HF_HUB_CACHE,
-    HF_DATASETS_CACHE,
-    HF_TRANSFORMERS_CACHE,
-    HF_ASSETS_CACHE,
-]:
-    os.makedirs(path, exist_ok=True)
-
-# ---------------------------------------------------------------------
 # Runtime env
 # ---------------------------------------------------------------------
 if "CUDA_VISIBLE_DEVICES" not in os.environ:
@@ -51,11 +26,15 @@ from transformers import Seq2SeqTrainingArguments, WhisperProcessor
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.config_loader import load_config
-from src.model.model import load_model
-from src.data.dataset import DataConfig, build_train_dataset, build_eval_dataset
+from src.model.model   import load_model
+from src.data.dataset  import DataConfig, build_train_dataset, build_eval_dataset
 from src.data.collator import DataCollatorSpeechSeq2SeqWithPadding
-from src.training.trainer import WhisperTrainer
-from src.training.callbacks import SaveCheckpointCallback, EarlyStoppingOnWER
+from src.model.bottleneck_adapter import (
+    inject_bottleneck_adapters, freeze_non_adapter_params,
+    count_adapter_params, save_adapter_weights,
+)
+from src.training.trainer   import WhisperTrainer
+from src.training.callbacks import SaveCheckpointCallback, SaveAdapterCallback, EarlyStoppingOnWER
 from src.evaluation.metrics import make_compute_metrics
 
 
@@ -210,6 +189,23 @@ def main():
     print(f"Run precision: {'bf16' if use_bf16 else 'fp16' if use_fp16 else 'fp32'}")
     print(f"Model dtype before trainer: {next(model.parameters()).dtype}\n")
 
+    # ── BAFT mode: inject bottleneck adapters + freeze base model ────────────
+    baft_cfg = cfg.get("baft", {})
+    _baft_enabled = baft_cfg.get("enabled", False)
+    if _baft_enabled:
+        print("BAFT mode: injecting bottleneck adapters...")
+        model = inject_bottleneck_adapters(
+            model,
+            d=baft_cfg.get("d", 64),
+            dropout=baft_cfg.get("dropout", 0.0),
+        )
+        freeze_non_adapter_params(model)
+        stats = count_adapter_params(model)
+        print(f"  Trainable (adapters only): {stats['trainable']:,}  ({stats['pct']}%)")
+        print(f"  Total                    : {stats['total']:,}\n")
+    else:
+        print(f"  Parameters : {sum(p.numel() for p in model.parameters()):,}")
+ 
     print("Connecting to dataset (streaming)...")
     data_config = DataConfig.from_omega(cfg)
 
@@ -229,19 +225,23 @@ def main():
     report_to_value = _normalize_report_to(getattr(t, "report_to", None))
     print(f"Reporting integrations: {report_to_value}\n")
 
+    # ── 6. Training arguments ─────────────────────────────────────────────────
     training_args = Seq2SeqTrainingArguments(
         output_dir=t.output_dir,
+ 
         max_steps=t.max_steps,
         warmup_steps=t.warmup_steps,
-
-        per_device_train_batch_size=train_bs,
-        per_device_eval_batch_size=eval_bs,
-        gradient_accumulation_steps=grad_accum,
-
+ 
+        per_device_train_batch_size=t.per_device_train_batch_size,
+        per_device_eval_batch_size=t.per_device_eval_batch_size,
+        gradient_accumulation_steps=t.gradient_accumulation_steps,
+ 
         learning_rate=t.learning_rate,
         lr_scheduler_type=t.lr_scheduler_type,
         weight_decay=t.weight_decay,
-
+ 
+        # During smoke test skip mid-training eval — only run final eval
+        # against the capped eval_dataset set above.
         eval_strategy="no" if smoke else t.eval_strategy,
         eval_steps=None if smoke else t.eval_steps,
         save_strategy="no" if smoke else t.save_strategy,
@@ -249,28 +249,40 @@ def main():
         load_best_model_at_end=False if smoke else t.load_best_model_at_end,
         metric_for_best_model=None if smoke else t.metric_for_best_model,
         greater_is_better=None if smoke else t.greater_is_better,
-
+ 
         bf16=use_bf16,
         fp16=use_fp16,
-        gradient_checkpointing=use_gradient_checkpointing,
-        gradient_checkpointing_kwargs={"use_reentrant": False} if use_gradient_checkpointing else None,
+        gradient_checkpointing=t.get("gradient_checkpointing", True) and has_gpu,
+ 
         dataloader_num_workers=0,
         dataloader_pin_memory=False,
-
-        predict_with_generate=False if smoke else t.predict_with_generate,
+ 
+        predict_with_generate=t.predict_with_generate,
         generation_max_length=t.generation_max_length,
-
-        logging_steps=1 if smoke else t.logging_steps,
-        report_to=report_to_value,
+ 
+        logging_steps=t.logging_steps,
+        report_to=t.report_to,
+ 
         remove_unused_columns=False,
-        max_grad_norm=1.0,
     )
-
+ 
+    # ── 7. Callbacks ──────────────────────────────────────────────────────────
+    save_cb = SaveAdapterCallback() if _baft_enabled else SaveCheckpointCallback()
     callbacks = [
-        SaveCheckpointCallback(),
+        save_cb,
         EarlyStoppingOnWER(patience=5, min_delta=0.001),
     ]
-
+ 
+    # ── 8. Trainer ────────────────────────────────────────────────────────────
+    # During smoke test, cap eval at a small fixed number of batches so it
+    # doesn't stream the entire eval split (which has no __len__).
+    import itertools
+    smoke = os.environ.get("SMOKE_TEST", "false").lower() == "true"
+    if smoke and eval_dataset is not None:
+        smoke_eval_samples = t.get("smoke_test_steps", 10) * t.per_device_eval_batch_size
+        eval_dataset = list(itertools.islice(iter(eval_dataset), smoke_eval_samples))
+        print(f"[SMOKE TEST] Eval capped at {len(eval_dataset)} samples.\n")
+ 
     trainer = WhisperTrainer(
         model=model,
         args=training_args,
@@ -279,17 +291,41 @@ def main():
         data_collator=collator,
         compute_metrics=compute_metrics,
         callbacks=callbacks,
-        processing_class=processor.feature_extractor,
+        tokenizer=processor.feature_extractor,
     )
-
+ 
+    # ── 9. Train ──────────────────────────────────────────────────────────────
     print("Starting training...\n")
-    trainer.train()
-
+    last_checkpoint = _find_last_checkpoint(t.output_dir)
+    if last_checkpoint:
+        print(f"Resuming from checkpoint: {last_checkpoint}\n")
+ 
+    trainer.train(resume_from_checkpoint=last_checkpoint)
+ 
+    # ── 10. Save ──────────────────────────────────────────────────────────────
     final_dir = Path(t.output_dir) / "final_model"
-    model.save_pretrained(final_dir)
-    processor.save_pretrained(final_dir)
-    print(f"\nModel saved → {final_dir}")
-
-
+    if _baft_enabled:
+        # Save only adapter weights (~50MB) — base model reloaded from HF at inference
+        save_adapter_weights(model, str(final_dir))
+        processor.save_pretrained(final_dir)
+        print(f"\nAdapter weights saved → {final_dir}")
+    else:
+        model.save_pretrained(final_dir)
+        processor.save_pretrained(final_dir)
+        print(f"\nModel saved → {final_dir}")
+    print("Training complete. Proceed to Step 5: evaluation.\n")
+ 
+ 
+def _find_last_checkpoint(output_dir: str):
+    output_path = Path(output_dir)
+    if not output_path.exists():
+        return None
+    checkpoints = sorted(
+        output_path.glob("checkpoint-*"),
+        key=lambda p: int(p.name.split("-")[-1]),
+    )
+    return str(checkpoints[-1]) if checkpoints else None
+ 
+ 
 if __name__ == "__main__":
     main()

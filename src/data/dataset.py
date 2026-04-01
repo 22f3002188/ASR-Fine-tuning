@@ -418,7 +418,7 @@ class StreamingASRDataset(TorchIterableDataset):
             raw_domain = safe_domain(sample, self.config.domain_column)
 
             if DEBUG_PRINT_RAW_DOMAINS and raw_domain_printed < DEBUG_RAW_DOMAIN_PRINT_LIMIT:
-                print(f"[RAW DOMAIN] {repr(raw_domain)}", flush=True)
+                # print(f"[RAW DOMAIN] {repr(raw_domain)}", flush=True)
                 raw_domain_printed += 1
 
             try:
@@ -441,12 +441,12 @@ class StreamingASRDataset(TorchIterableDataset):
                 total_skipped += 1
                 if DEBUG_PRINT_SKIP_REASONS and skip_reason_printed < DEBUG_SKIP_REASON_PRINT_LIMIT:
                     audio_candidate = extract_audio_candidate(sample, self.config.audio_column)
-                    print(
-                        f"[SKIP] reason={reason} | domain={repr(raw_domain)} | "
-                        f"text_present={sample.get(self.config.text_column) is not None} | "
-                        f"audio_type={type(audio_candidate).__name__}",
-                        flush=True,
-                    )
+                    # print(
+                    #     f"[SKIP] reason={reason} | domain={repr(raw_domain)} | "
+                    #     f"text_present={sample.get(self.config.text_column) is not None} | "
+                    #     f"audio_type={type(audio_candidate).__name__}",
+                    #     flush=True,
+                    # )
                     skip_reason_printed += 1
 
                 if (
@@ -461,20 +461,20 @@ class StreamingASRDataset(TorchIterableDataset):
                 buffer.append(processed)
 
                 if DEBUG_PRINT_SUCCESS_SAMPLES and success_printed < DEBUG_SUCCESS_PRINT_LIMIT:
-                    print(
-                        f"[KEPT] domain={repr(processed['domain'])} | "
-                        f"duration={processed['duration']:.2f}s | "
-                        f"text_len={len(processed['text'])}",
-                        flush=True,
-                    )
+                    # print(
+                    #     f"[KEPT] domain={repr(processed['domain'])} | "
+                    #     f"duration={processed['duration']:.2f}s | "
+                    #     f"text_len={len(processed['text'])}",
+                    #     flush=True,
+                    # )
                     success_printed += 1
 
-            if total_seen % DEBUG_PROGRESS_EVERY == 0:
-                print(
-                    f"[DEBUG] Seen:{total_seen} Kept:{total_kept} "
-                    f"Skipped:{total_skipped} Reasons:{reason_counts}",
-                    flush=True,
-                )
+            # if total_seen % DEBUG_PROGRESS_EVERY == 0:
+            #     print(
+            #         f"[DEBUG] Seen:{total_seen} Kept:{total_kept} "
+            #         f"Skipped:{total_skipped} Reasons:{reason_counts}",
+            #         flush=True,
+            #     )
 
             if len(buffer) >= self.config.prefetch_size:
                 random.shuffle(buffer)

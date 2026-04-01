@@ -1,5 +1,4 @@
-# LoRA is currently disabled — vanilla full finetuning is used instead.
-# Re-enable by setting enabled: true and wiring apply_lora() back into train.py.
+# ── LoRA (currently disabled) ─────────────────────────────────────────────────
 lora:
   enabled: false
   r: 32
@@ -15,3 +14,12 @@ freeze:
   encoder: false
   freeze_decoder_layers: 0
   freeze_embed_positions: false
+
+# ── Bottleneck Adapter / BAFT ─────────────────────────────────────────────────
+# Set enabled: true to switch from vanilla finetuning to BAFT.
+# Only BA parameters (~0.8% of model) are trained — all Whisper weights frozen.
+# Recommended LR: 3e-4 (10x higher than vanilla FT, per Liu et al. 2024)
+baft:
+  enabled: true
+  d: 64           # bottleneck dimension — 64 is optimal per paper
+  dropout: 0.0    # dropout inside the adapter (0 = off, 0.1 for regularisation)

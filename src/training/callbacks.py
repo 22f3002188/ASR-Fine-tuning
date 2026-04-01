@@ -83,3 +83,31 @@ class EarlyStoppingOnWER(TrainerCallback):
             control.should_training_stop = True
 
         return control
+
+
+class SaveAdapterCallback(TrainerCallback):
+    """
+    BAFT-mode checkpoint callback.
+    Saves only the bottleneck adapter weights at each checkpoint step.
+    Each checkpoint is ~50MB instead of ~6GB for large-v3.
+    """
+
+    def on_save(
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        **kwargs,
+    ):
+        from src.model.bottleneck_adapter import save_adapter_weights
+
+        model = kwargs.get("model")
+        if model is None:
+            return control
+
+        checkpoint_dir = os.path.join(
+            args.output_dir, f"checkpoint-{state.global_step}"
+        )
+        save_adapter_weights(model, checkpoint_dir)
+        print(f"[SaveAdapterCallback] Adapter saved → {checkpoint_dir}")
+        return control
