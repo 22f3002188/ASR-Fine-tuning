@@ -26,3 +26,14 @@ training:
 
   bf16: true
   fp16: false
+
+  report_to:
+    - mlflow
+
+  load_best_model_at_end: true
+  metric_for_best_model: wer
+  greater_is_better: false
+
+  lr_scheduler_type: linear
+  weight_decay: 0.0
+  predict_with_generate: true

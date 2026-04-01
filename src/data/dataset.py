@@ -6,6 +6,7 @@ Simple, readable, and compatible with Seq2SeqTrainer.
 from __future__ import annotations
 
 import io
+import os
 import random
 import re
 import tempfile
@@ -14,9 +15,10 @@ from pathlib import Path
 from typing import Any, Iterator, Optional
 
 import librosa
+import numpy as np
 import soundfile as sf
 from datasets import load_dataset
-from torch.utils.data import IterableDataset
+from torch.utils.data import IterableDataset, get_worker_info
 from transformers import WhisperProcessor
 
 try:
@@ -58,6 +60,21 @@ class DataConfig:
         return cls(**{k: v for k, v in raw.items() if k in valid_fields})
 
 
+def get_hf_datasets_cache_dir() -> str:
+    base = os.environ.get("HF_HOME", str(Path.home() / "hf_cache"))
+    cache_dir = os.environ.get("HF_DATASETS_CACHE", f"{base}/datasets")
+    Path(cache_dir).mkdir(parents=True, exist_ok=True)
+    return cache_dir
+
+
+def resolve_split_name(config: DataConfig, split_name: str) -> str:
+    if split_name == "train":
+        return config.split_train
+    if split_name in {"val", "valid", "validation", "eval"}:
+        return config.split_val
+    return split_name
+
+
 def clean_text(text: Any) -> Optional[str]:
     if text is None:
         return None
@@ -97,12 +114,15 @@ def get_domain(sample: dict[str, Any], domain_column: str) -> str:
 
 
 def open_stream(config: DataConfig, split_name: str, token: Optional[str] = None):
+    resolved_split = resolve_split_name(config, split_name)
+
     ds = load_dataset(
         config.dataset_name,
         config.language,
-        split=split_name,
+        split=resolved_split,
         streaming=True,
         token=token,
+        cache_dir="/home/harsh/hf_cache/datasets",
     )
 
     try:
@@ -110,23 +130,24 @@ def open_stream(config: DataConfig, split_name: str, token: Optional[str] = None
     except Exception:
         pass
 
-    if split_name == config.split_train:
+    if resolved_split == config.split_train:
         ds = ds.shuffle(seed=config.seed, buffer_size=config.shuffle_buffer_size)
 
     return ds
 
 
-def load_audio_from_path(audio_path: str, target_sr: int) -> Optional[tuple]:
+def load_audio_from_path(audio_path: str, target_sr: int) -> Optional[tuple[np.ndarray, int]]:
     try:
         audio, sr = librosa.load(audio_path, sr=target_sr, mono=True)
         if audio is None or len(audio) == 0:
             return None
+        audio = np.asarray(audio, dtype=np.float32)
         return audio, sr
     except Exception:
         return None
 
 
-def load_audio_from_bytes(audio_bytes: bytes, target_sr: int) -> Optional[tuple]:
+def load_audio_from_bytes(audio_bytes: bytes, target_sr: int) -> Optional[tuple[np.ndarray, int]]:
     try:
         with io.BytesIO(audio_bytes) as buffer:
             audio, sr = sf.read(buffer, dtype="float32")
@@ -134,12 +155,15 @@ def load_audio_from_bytes(audio_bytes: bytes, target_sr: int) -> Optional[tuple]
         if audio is None or len(audio) == 0:
             return None
 
+        audio = np.asarray(audio, dtype=np.float32)
+
         if getattr(audio, "ndim", 1) > 1:
             audio = audio.mean(axis=1)
 
         if sr != target_sr:
             audio = librosa.resample(audio, orig_sr=sr, target_sr=target_sr)
 
+        audio = np.asarray(audio, dtype=np.float32)
         return audio, target_sr
     except Exception:
         pass
@@ -186,14 +210,14 @@ def extract_audio_field(sample: dict[str, Any], preferred_key: str) -> Optional[
     return None
 
 
-def load_audio(audio_obj: Any, target_sr: int) -> Optional[tuple]:
+def load_audio(audio_obj: Any, target_sr: int) -> Optional[tuple[np.ndarray, int]]:
     if audio_obj is None:
         return None
 
     if isinstance(audio_obj, dict):
         if "array" in audio_obj and audio_obj["array"] is not None:
             try:
-                audio = audio_obj["array"]
+                audio = np.asarray(audio_obj["array"], dtype=np.float32)
                 sr = int(audio_obj.get("sampling_rate", target_sr))
 
                 if getattr(audio, "ndim", 1) > 1:
@@ -201,6 +225,8 @@ def load_audio(audio_obj: Any, target_sr: int) -> Optional[tuple]:
 
                 if sr != target_sr:
                     audio = librosa.resample(audio, orig_sr=sr, target_sr=target_sr)
+
+                audio = np.asarray(audio, dtype=np.float32)
 
                 if audio is None or len(audio) == 0:
                     return None
@@ -227,7 +253,7 @@ def load_audio(audio_obj: Any, target_sr: int) -> Optional[tuple]:
         audio = decoded.data.squeeze(0).numpy().astype("float32")
         if audio is None or len(audio) == 0:
             return None
-        return audio, target_sr
+        return np.asarray(audio, dtype=np.float32), target_sr
     except Exception:
         return None
 
@@ -308,7 +334,7 @@ class StreamingASRDataset(IterableDataset):
         self.processor = processor
         self.split_name = split_name
         self.token = token
-        self.is_train = split_name == config.split_train
+        self.is_train = resolve_split_name(config, split_name) == config.split_train
         self.augmentor = self._build_augmentor()
 
     def _build_augmentor(self) -> Optional[Any]:
@@ -327,9 +353,13 @@ class StreamingASRDataset(IterableDataset):
         )
 
     def __iter__(self) -> Iterator[dict[str, Any]]:
-        random.seed(self.config.seed)
-        stream = open_stream(self.config, self.split_name, token=self.token)
+        worker_info = get_worker_info()
+        worker_id = worker_info.id if worker_info is not None else 0
+        seed = self.config.seed + worker_id
 
+        random.seed(seed)
+
+        stream = open_stream(self.config, self.split_name, token=self.token)
         buffer: list[dict[str, Any]] = []
 
         for sample in stream:
@@ -376,7 +406,7 @@ def build_eval_dataset(
     token: Optional[str] = None,
 ) -> Optional[StreamingASRDataset]:
     try:
-        open_stream(config, config.split_val, token=token)
+        _ = open_stream(config, config.split_val, token=token)
         return StreamingASRDataset(
             config=config,
             processor=processor,
