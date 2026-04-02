@@ -122,7 +122,7 @@ def open_stream(config: DataConfig, split_name: str, token: Optional[str] = None
         split=resolved_split,
         streaming=True,
         token=token,
-        cache_dir="/home/harsh/hf_cache/datasets",
+        cache_dir=os.environ.get("HF_DATASETS_CACHE"),
     )
 
     try:

@@ -22,14 +22,14 @@ from pathlib import Path
 # ==========================================================
 # FORCE HF CACHE PATHS BEFORE ANY HF IMPORTS
 # ==========================================================
-HF_BASE = "/home/harsh/hf_cache"
+HF_BASE = os.environ.get("HF_HOME", str(Path.home() / "hf_cache"))
 
 os.environ["HF_HOME"] = HF_BASE
-os.environ["HF_HUB_CACHE"] = f"{HF_BASE}/hub"
-os.environ["HF_DATASETS_CACHE"] = f"{HF_BASE}/datasets"
-os.environ["HF_ASSETS_CACHE"] = f"{HF_BASE}/assets"
-os.environ["TRANSFORMERS_CACHE"] = f"{HF_BASE}/transformers"
-os.environ["XDG_CACHE_HOME"] = HF_BASE
+os.environ["HF_HUB_CACHE"] = os.environ.get("HF_HUB_CACHE", f"{HF_BASE}/hub")
+os.environ["HF_DATASETS_CACHE"] = os.environ.get("HF_DATASETS_CACHE", f"{HF_BASE}/datasets")
+os.environ["HF_ASSETS_CACHE"] = os.environ.get("HF_ASSETS_CACHE", f"{HF_BASE}/assets")
+os.environ["TRANSFORMERS_CACHE"] = os.environ.get("TRANSFORMERS_CACHE", f"{HF_BASE}/transformers")
+os.environ["XDG_CACHE_HOME"] = os.environ.get("XDG_CACHE_HOME", HF_BASE)
 
 os.environ["CUDA_VISIBLE_DEVICES"] = os.environ.get("CUDA_VISIBLE_DEVICES", "0")
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
@@ -348,7 +348,7 @@ def main() -> None:
     report_to_value = ["mlflow"]
     run_name = build_run_name(cfg, smoke)
 
-    mlflow_tracking_uri = os.getenv("MLFLOW_TRACKING_URI", "file:/home/harsh/mlruns")
+    mlflow_tracking_uri = os.getenv("MLFLOW_TRACKING_URI", "sqlite:///mlflow.db")
     mlflow_experiment_name = os.getenv("MLFLOW_EXPERIMENT_NAME", "whisper-asr-finetuning")
 
     mlflow.set_tracking_uri(mlflow_tracking_uri)
