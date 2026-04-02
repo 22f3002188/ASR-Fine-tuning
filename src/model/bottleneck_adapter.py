@@ -27,6 +27,7 @@ Key hyperparameter: d (bottleneck dimension)
     d=256 → ~3.2% trainable params
 """
 
+import os
 import torch
 import torch.nn as nn
 from transformers import WhisperForConditionalGeneration
@@ -214,11 +215,11 @@ def load_adapter_weights(
     state = torch.load(path, map_location="cpu")
     missing, unexpected = model.load_state_dict(state, strict=False)
 
-    if strict and (missing or unexpected):
+    if unexpected:
         raise RuntimeError(
-            f"Adapter weight mismatch.\n"
-            f"  Missing   : {missing[:5]}\n"
-            f"  Unexpected: {unexpected[:5]}"
+            f"Unexpected adapter weights:\n{unexpected[:5]}"
         )
+    
     print(f"Adapter weights loaded from {path}")
+    print(f"Missing keys (expected for base model): {len(missing)}")
     return model

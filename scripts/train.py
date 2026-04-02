@@ -242,10 +242,10 @@ def main():
  
         # During smoke test skip mid-training eval — only run final eval
         # against the capped eval_dataset set above.
-        eval_strategy="no" if smoke else t.eval_strategy,
-        eval_steps=None if smoke else t.eval_steps,
-        save_strategy="no" if smoke else t.save_strategy,
-        save_steps=None if smoke else t.save_steps,
+        eval_strategy='steps', #"no" if smoke else t.eval_strategy,
+        eval_steps=10, #None if smoke else t.eval_steps,
+        save_strategy='steps', #"no" if smoke else t.save_strategy,
+        save_steps=10, #None if smoke else t.save_steps,
         load_best_model_at_end=False if smoke else t.load_best_model_at_end,
         metric_for_best_model=None if smoke else t.metric_for_best_model,
         greater_is_better=None if smoke else t.greater_is_better,

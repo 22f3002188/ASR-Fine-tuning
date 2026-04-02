@@ -19,6 +19,7 @@ from src.evaluation.metrics import make_compute_metrics
 from src.evaluation.error_analysis import ErrorAnalyser
 from src.data.dataset import DataConfig, build_eval_dataset
 from src.data.collator import DataCollatorSpeechSeq2SeqWithPadding
+from src.model.bottleneck_adapter import inject_bottleneck_adapters, load_adapter_weights
 
 
 def run_evaluation(
@@ -42,15 +43,45 @@ def run_evaluation(
     device    = "cuda" if torch.cuda.is_available() else "cpu"
 
     print(f"Loading model from {model_dir}...")
+
+    baft_enabled = cfg.get("baft", {}).get("enabled", False)
+    
+    # ── Processor ALWAYS from base model ───────────────────────────────
     processor = WhisperProcessor.from_pretrained(
-        model_dir,
+        cfg.model.name,
         language=cfg.model.language,
         task=cfg.model.task,
     )
-    model = WhisperForConditionalGeneration.from_pretrained(
-        model_dir,
-        dtype=torch.float16 if device == "cuda" else torch.float32,
-    ).to(device)
+    
+    # ── Load model ─────────────────────────────────────────────────────
+    if baft_enabled:
+        print("BAFT detected → reconstructing model with adapters...")
+    
+        # 1. Load base model
+        model = WhisperForConditionalGeneration.from_pretrained(
+            cfg.model.name,
+            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+        )
+    
+        # 2. Inject adapters (same config as training!)
+        baft_cfg = cfg.get("baft", {})
+        model = inject_bottleneck_adapters(
+            model,
+            d=baft_cfg.get("d", 64),
+            dropout=baft_cfg.get("dropout", 0.0),
+        )
+    
+        # 3. Load adapter weights
+        model = load_adapter_weights(model, model_dir)
+    
+    else:
+        print("Full finetune model detected → loading directly...")
+        model = WhisperForConditionalGeneration.from_pretrained(
+            model_dir,
+            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+        )
+    
+    model = model.to(device)
     model.eval()
 
     # ── Dataset ───────────────────────────────────────────────────────────────
