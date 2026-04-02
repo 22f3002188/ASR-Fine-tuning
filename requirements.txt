@@ -12,3 +12,4 @@ jiwer
 peft
 accelerate
 torchaudio
+mlflow
